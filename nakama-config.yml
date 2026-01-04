@@ -1,0 +1,55 @@
+name: werewolf-game
+data_dir: /nakama/data
+
+logger:
+  stdout: true
+  level: info
+  format: json
+
+metrics:
+  reporting_freq_sec: 60
+  namespace: werewolf
+
+runtime:
+  js_entrypoint: index.js
+  http_key: werewolf_server_key
+  env:
+    - GAME_NAME=werewolf
+    - MIN_PLAYERS=6
+    - MAX_PLAYERS=18
+    - DEFAULT_PLAYERS=9
+
+session:
+  token_expiry_sec: 7200
+  refresh_token_expiry_sec: 604800
+
+socket:
+  max_message_size_bytes: 4096
+  max_request_size_bytes: 131072
+  read_buffer_size_bytes: 4096
+  write_buffer_size_bytes: 4096
+  read_timeout_ms: 10000
+  write_timeout_ms: 10000
+  pong_wait_ms: 25000
+  ping_period_ms: 15000
+  ping_backoff_threshold: 5
+
+match:
+  input_queue_size: 128
+  call_queue_size: 128
+  join_attempt_queue_size: 128
+  deferred_queue_size: 128
+  join_marker_deadline_ms: 15000
+  max_empty_sec: 300
+  label_update_interval_ms: 1000
+
+console:
+  port: 7351
+  address: ""
+  max_message_size_bytes: 409600
+  read_timeout_ms: 10000
+  write_timeout_ms: 60000
+  idle_timeout_ms: 300000
+  username: admin
+  password: password
+  signing_key: console_signing_key_change_in_production

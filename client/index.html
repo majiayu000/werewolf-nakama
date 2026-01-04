@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/wolf.svg" />
+    <link rel="alternate icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+    <link rel="mask-icon" href="/wolf.svg" color="#8b0000" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="description" content="在线多人狼人杀游戏 - 与好友一起推理、欺骗、生存" />
+    <meta name="theme-color" content="#0f0f23" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="狼人杀" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="狼人杀" />
+    <meta name="msapplication-TileColor" content="#0f0f23" />
+    <meta name="msapplication-config" content="/browserconfig.xml" />
+
+    <!-- Open Graph / Social Media -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="狼人杀 - Werewolf Online" />
+    <meta property="og:description" content="在线多人狼人杀游戏 - 与好友一起推理、欺骗、生存" />
+    <meta property="og:image" content="/og-image.png" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="狼人杀 - Werewolf Online" />
+    <meta name="twitter:description" content="在线多人狼人杀游戏 - 与好友一起推理、欺骗、生存" />
+
+    <title>狼人杀 - Werewolf Online</title>
+
+    <!-- Preconnect to Nakama server -->
+    <link rel="preconnect" href="http://localhost:7350" />
+    <link rel="dns-prefetch" href="http://localhost:7350" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+
+    <!-- PWA install prompt handler -->
+    <script>
+      // Handle PWA install prompt
+      let deferredPrompt;
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredPrompt = e;
+        // Dispatch custom event for React to handle
+        window.dispatchEvent(new CustomEvent('pwa-install-available', { detail: e }));
+      });
+
+      window.addEventListener('appinstalled', () => {
+        deferredPrompt = null;
+        window.dispatchEvent(new CustomEvent('pwa-installed'));
+      });
+
+      // Expose install function for React
+      window.installPWA = async () => {
+        if (deferredPrompt) {
+          deferredPrompt.prompt();
+          const { outcome } = await deferredPrompt.userChoice;
+          deferredPrompt = null;
+          return outcome === 'accepted';
+        }
+        return false;
+      };
+    </script>
+  </body>
+</html>
