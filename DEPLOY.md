@@ -202,7 +202,7 @@ services:
     container_name: werewolf-nakama
     entrypoint:
       - "/bin/sh"
-      - "-ecx"
+      - "-ec"
       - >
         /nakama/nakama migrate up --database.address root@cockroachdb:26257 &&
         exec /nakama/nakama --config /nakama/data/nakama-config.yml
