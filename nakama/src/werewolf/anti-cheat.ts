@@ -257,6 +257,14 @@ export function validateSkill(
       if (targetId === player.oderId) {
         return { valid: false, reason: 'Cannot check yourself' };
       }
+      // Cannot check dead players (blocks farming correct-wolf progress)
+      const seerTarget = state.players.get(targetId);
+      if (!seerTarget) {
+        return { valid: false, reason: 'Invalid target: player not found' };
+      }
+      if (seerTarget.status !== PlayerStatus.ALIVE) {
+        return { valid: false, reason: 'Cannot check dead players' };
+      }
       break;
 
     case Role.WITCH:

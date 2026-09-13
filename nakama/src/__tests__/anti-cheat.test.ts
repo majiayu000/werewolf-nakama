@@ -307,6 +307,26 @@ describe('Skill Validation', () => {
     expect(result.reason).toContain('yourself');
   });
 
+  it('should reject seer checking a dead player', () => {
+    const state = createTestGameState({
+      phase: GamePhase.NIGHT,
+      nightSubPhase: NightSubPhase.SEER,
+    });
+    const seer = createTestPlayer({ role: Role.SEER });
+    const deadWolf = createTestPlayer({
+      oderId: 'dead-wolf',
+      role: Role.WEREWOLF,
+      status: PlayerStatus.DEAD_BY_VOTE,
+    });
+
+    state.players.set(seer.oderId, seer);
+    state.players.set(deadWolf.oderId, deadWolf);
+
+    const result = validateSkill(state, seer, 'check', 'dead-wolf');
+    expect(result.valid).toBe(false);
+    expect(result.reason).toContain('dead');
+  });
+
   it('should reject witch heal without antidote', () => {
     const state = createTestGameState({
       phase: GamePhase.NIGHT,

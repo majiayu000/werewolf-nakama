@@ -18,6 +18,7 @@ import {
   XP_REWARDS,
   getFinalGuardActionsByPlayer,
   computePlayerFactionSize,
+  findWitchActionForEffectiveTarget,
 } from '../werewolf/types';
 import { createMockLogger } from './test-utils';
 
@@ -339,6 +340,23 @@ describe('applyGameResultStats', () => {
     expect(matchingRaw).toBe(2);
     const matchingFinal = Array.from(finalByPlayer.values()).filter(a => a.targetId === 'A').length;
     expect(matchingFinal).toBe(1);
+  });
+
+  test('credits poison to the witch matching the effective target', () => {
+    const actions = [
+      { playerId: 'witch-a', role: Role.WITCH, action: 'poison', targetId: 'villager-1', timestamp: 1 },
+      { playerId: 'witch-b', role: Role.WITCH, action: 'poison', targetId: 'wolf-1', timestamp: 2 },
+    ];
+
+    // Naive .find(poison) credits witch-a; effective target wolf-1 must credit witch-b
+    const naive = actions.find(a => a.role === Role.WITCH && a.action === 'poison');
+    expect(naive?.playerId).toBe('witch-a');
+
+    const credited = findWitchActionForEffectiveTarget(actions, 'poison', 'wolf-1');
+    expect(credited?.playerId).toBe('witch-b');
+    expect(credited?.targetId).toBe('wolf-1');
+
+    expect(findWitchActionForEffectiveTarget(actions, 'poison', null)).toBeUndefined();
   });
 
   test('sizes sole-survivor factions with effective allies and lovers', () => {

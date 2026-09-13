@@ -21,6 +21,7 @@ import {
   PRESET_CONFIGS,
   getRoleFaction,
   getFinalGuardActionsByPlayer,
+  findWitchActionForEffectiveTarget,
   computePlayerFactionSize,
   isWerewolf,
   PlayerExtendedState,
@@ -1583,29 +1584,33 @@ function handleUseSkill(
           break;
         }
 
+        // Reject dead/missing targets before recording or awarding progress
+        const target = state.players.get(targetId);
+        if (!target || target.status !== PlayerStatus.ALIVE || !target.role) {
+          logger.warn('Invalid seer target (missing, dead, or unassigned role)');
+          break;
+        }
+
         state.seerTarget = targetId;
         state.nightActions.push(action);
 
         // Send result to seer
-        const target = state.players.get(targetId);
-        if (target && target.role) {
-          const targetFaction = getRoleFaction(target.role);
-          sendToPlayer(dispatcher, OpCode.SKILL_RESULT, {
-            skill: 'check',
-            success: true,
-            result: {
-              targetId,
-              faction: targetFaction,
-            },
-          }, { userId: player.oderId, sessionId: '', username: '', node: '' });
+        const targetFaction = getRoleFaction(target.role);
+        sendToPlayer(dispatcher, OpCode.SKILL_RESULT, {
+          skill: 'check',
+          success: true,
+          result: {
+            targetId,
+            faction: targetFaction,
+          },
+        }, { userId: player.oderId, sessionId: '', username: '', node: '' });
 
-          // Track seer correct-wolf checks + wolf exposure for achievements
-          if (extState && isWerewolf(target.role)) {
-            extState.seerCheckedWolves = (extState.seerCheckedWolves || 0) + 1;
-            const targetExt = state.extendedStates.get(targetId);
-            if (targetExt) {
-              targetExt.wasExposed = true;
-            }
+        // Track seer correct-wolf checks + wolf exposure for achievements
+        if (extState && isWerewolf(target.role)) {
+          extState.seerCheckedWolves = (extState.seerCheckedWolves || 0) + 1;
+          const targetExt = state.extendedStates.get(targetId);
+          if (targetExt) {
+            targetExt.wasExposed = true;
           }
         }
       }
@@ -2086,9 +2091,11 @@ function processNightResults(
       else if (state.witchSaveTarget === state.wolfTarget) {
         savedByWitch = true;
         logger.info(`${target.displayName} was saved by witch`);
-        // Credit only the witch who used the antidote
-        const saveAction = state.nightActions.find(
-          a => a.role === Role.WITCH && a.action === 'heal'
+        // Credit the witch whose heal matches the effective save target
+        const saveAction = findWitchActionForEffectiveTarget(
+          state.nightActions,
+          'heal',
+          state.witchSaveTarget
         );
         if (saveAction) {
           const witchExt = state.extendedStates.get(saveAction.playerId);
@@ -2121,9 +2128,11 @@ function processNightResults(
       logger.info(`${target.displayName} was poisoned by witch`);
 
       if (target.role && isWerewolf(target.role)) {
-        // Credit only the witch who used the poison
-        const poisonAction = state.nightActions.find(
-          a => a.role === Role.WITCH && a.action === 'poison'
+        // Credit the witch whose poison matches the effective poison target
+        const poisonAction = findWitchActionForEffectiveTarget(
+          state.nightActions,
+          'poison',
+          state.witchPoisonTarget
         );
         if (poisonAction) {
           const witchExt = state.extendedStates.get(poisonAction.playerId);

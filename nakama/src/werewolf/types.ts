@@ -937,6 +937,25 @@ export function getFinalGuardActionsByPlayer(
 }
 
 /**
+ * Credit the witch whose accepted action matches the effective global target.
+ * With multiple witches, later actions can overwrite witchPoisonTarget / witchSaveTarget;
+ * `.find(poison)` alone would credit the first witch instead of the effective actor.
+ */
+export function findWitchActionForEffectiveTarget(
+  nightActions: NightAction[],
+  action: 'poison' | 'heal',
+  effectiveTargetId: string | null | undefined
+): NightAction | undefined {
+  if (!effectiveTargetId) return undefined;
+  return nightActions.find(
+    a =>
+      a.role === Role.WITCH &&
+      a.action === action &&
+      a.targetId === effectiveTargetId
+  );
+}
+
+/**
  * Alive ally count for LAST_STAND / COMEBACK_KING.
  * Uses effective win factions; lovers victories size the lovers pair, not origin roles.
  */
