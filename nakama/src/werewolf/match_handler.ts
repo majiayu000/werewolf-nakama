@@ -42,6 +42,7 @@ import { createGameEventLogger, GameEventLogger, GameEventType } from './game-ev
 import {
   ReplayBuffer, ReplayPlayer, ReplayConfig, saveReplay, createReplayBuffer
 } from './replay';
+import { applyGameResultStats } from './game-result';
 
 // Match-specific loggers and metrics storage
 const matchLoggers = new Map<string, GameEventLogger>();
@@ -2385,7 +2386,9 @@ function endGame(
 }
 
 /**
- * Record game statistics for all players
+ * Record game statistics for all players via the shared game-result writer
+ * (XP, level, streak, and achievements). Write helpers are server-only —
+ * not exposed as client RPCs (SEC-02).
  */
 function recordGameStats(
   state: GameState,
@@ -2394,7 +2397,6 @@ function recordGameStats(
   logger: nkruntime.Logger
 ): void {
   try {
-    // Build player data for stats recording
     const playerData = Array.from(state.players.values())
       .filter(p => !p.isSpectator)
       .map(p => {
@@ -2402,7 +2404,6 @@ function recordGameStats(
         const faction = p.role ? getRoleFaction(p.role) : Faction.VILLAGER;
         const isLover = extState?.isLovers || false;
 
-        // Determine if player won
         let isWinner = false;
         if (winner === Faction.LOVERS) {
           isWinner = isLover;
@@ -2413,159 +2414,29 @@ function recordGameStats(
         }
 
         return {
+          // Shared writer accepts userId; match players use oderId as Nakama user id
+          userId: p.oderId,
           oderId: p.oderId,
           role: p.role,
           faction,
           isWinner,
           isAlive: p.status === PlayerStatus.ALIVE,
           isLover,
+          // Skill counters defaulted — match state does not track them yet
+          seerCheckedWolves: 0,
+          witchSaved: false,
+          witchPoisonedWolf: false,
+          guardSaved: false,
+          hunterKilledWolf: false,
+          idiotRevealed: !!extState?.idiotRevealed,
         };
       });
 
-    // Call RPC to record stats (using server-to-server call)
-    const payload = JSON.stringify({
+    applyGameResultStats(nk, logger, {
       players: playerData,
       winner,
       sheriffId: state.sheriffId,
     });
-
-    // Use storageWrite directly for efficiency instead of RPC
-    const STATS_COLLECTION = 'werewolf_stats';
-    const STATS_KEY = 'user_stats';
-    const now = Date.now();
-    const writes: nkruntime.StorageWriteRequest[] = [];
-
-    for (const player of playerData) {
-      // Read existing stats
-      let stats: any;
-      try {
-        const objects = nk.storageRead([{
-          collection: STATS_COLLECTION,
-          key: STATS_KEY,
-          userId: player.oderId,
-        }]);
-
-        if (objects.length > 0 && objects[0].value) {
-          stats = objects[0].value;
-        } else {
-          stats = {
-            oderId: player.oderId,
-            totalGames: 0,
-            wins: 0,
-            losses: 0,
-            winRate: 0,
-            villagerWins: 0,
-            villagerGames: 0,
-            werewolfWins: 0,
-            werewolfGames: 0,
-            loversWins: 0,
-            loversGames: 0,
-            roleStats: {},
-            survivalRate: 0,
-            gamesAsSheriff: 0,
-            sheriffWins: 0,
-            firstGameAt: 0,
-            lastGameAt: 0,
-          };
-        }
-      } catch {
-        stats = {
-          oderId: player.oderId,
-          totalGames: 0,
-          wins: 0,
-          losses: 0,
-          winRate: 0,
-          villagerWins: 0,
-          villagerGames: 0,
-          werewolfWins: 0,
-          werewolfGames: 0,
-          loversWins: 0,
-          loversGames: 0,
-          roleStats: {},
-          survivalRate: 0,
-          gamesAsSheriff: 0,
-          sheriffWins: 0,
-          firstGameAt: 0,
-          lastGameAt: 0,
-        };
-      }
-
-      // Update total stats
-      stats.totalGames++;
-      if (player.isWinner) {
-        stats.wins++;
-      } else {
-        stats.losses++;
-      }
-      stats.winRate = stats.totalGames > 0
-        ? Math.round((stats.wins / stats.totalGames) * 100)
-        : 0;
-
-      // Update survival rate
-      const oldSurvivalWeight = (stats.totalGames - 1) * stats.survivalRate;
-      const newSurvival = player.isAlive ? 100 : 0;
-      stats.survivalRate = stats.totalGames > 0
-        ? Math.round((oldSurvivalWeight + newSurvival) / stats.totalGames)
-        : 0;
-
-      // Update faction stats
-      if (player.faction === Faction.WEREWOLF) {
-        stats.werewolfGames++;
-        if (player.isWinner) stats.werewolfWins++;
-      } else {
-        stats.villagerGames++;
-        if (player.isWinner) stats.villagerWins++;
-      }
-
-      // Update lover stats
-      if (player.isLover) {
-        stats.loversGames++;
-        if (player.isWinner && winner === Faction.LOVERS) {
-          stats.loversWins++;
-        }
-      }
-
-      // Update role stats
-      if (player.role) {
-        if (!stats.roleStats[player.role]) {
-          stats.roleStats[player.role] = { played: 0, wins: 0 };
-        }
-        stats.roleStats[player.role].played++;
-        if (player.isWinner) {
-          stats.roleStats[player.role].wins++;
-        }
-      }
-
-      // Update sheriff stats
-      if (player.oderId === state.sheriffId) {
-        stats.gamesAsSheriff++;
-        if (player.isWinner) {
-          stats.sheriffWins++;
-        }
-      }
-
-      // Update timestamps
-      if (stats.firstGameAt === 0) {
-        stats.firstGameAt = now;
-      }
-      stats.lastGameAt = now;
-
-      // Add to write batch
-      writes.push({
-        collection: STATS_COLLECTION,
-        key: STATS_KEY,
-        userId: player.oderId,
-        value: stats,
-        permissionRead: 2, // Public read
-        permissionWrite: 0, // Server-only write
-      });
-    }
-
-    // Write all updates
-    if (writes.length > 0) {
-      nk.storageWrite(writes);
-      logger.info(`Recorded stats for ${writes.length} players`);
-    }
   } catch (e) {
     logger.error(`Failed to record game stats: ${e}`);
   }

@@ -15,22 +15,28 @@ declare var matchLoop: nkruntime.MatchHandler['matchLoop'];
 declare var matchTerminate: nkruntime.MatchHandler['matchTerminate'];
 declare var matchSignal: nkruntime.MatchHandler['matchSignal'];
 import {
-  UserStats, createInitialUserStats, calculateLevelInfo, calculateGameXP,
+  UserStats, createInitialUserStats, calculateLevelInfo,
   GameInvite, InviteStatus, INVITE_CONFIG, LevelInfo,
   // Achievement types
-  AchievementId, AchievementCategory, AchievementRarity,
-  AchievementDefinition, AchievementProgress, UserAchievements, AchievementUnlock,
-  ACHIEVEMENT_DEFINITIONS, ACHIEVEMENT_CONFIG, createInitialUserAchievements,
-  checkAchievementUnlock, Role, Faction, isWerewolf
+  AchievementId,
+  AchievementDefinition, AchievementProgress, UserAchievements,
+  ACHIEVEMENT_DEFINITIONS,
 } from './werewolf/types';
 import {
   getUserReplays, getReplay, getReplayByOwner, getReplayStats, getKeyEvents,
   GameReplay, ReplayListItem
 } from './werewolf/replay';
+import {
+  STATS_COLLECTION,
+  STATS_KEY,
+  readAchievements,
+} from './werewolf/game-result';
+import {
+  CLIENT_RPC_IDS,
+  FORBIDDEN_CLIENT_WRITE_RPC_IDS,
+} from './werewolf/rpc-registry';
 
-// Storage collection for user stats
-const STATS_COLLECTION = 'werewolf_stats';
-const STATS_KEY = 'user_stats';
+export { CLIENT_RPC_IDS, FORBIDDEN_CLIENT_WRITE_RPC_IDS };
 
 /**
  * Initialize the Nakama module
@@ -62,27 +68,25 @@ function InitModule(
   });
   logger.info('Registered match handler: werewolf');
 
-  // Register RPC endpoints
+  // Register RPC endpoints (read/create only — no client-writable stats/achievements)
   initializer.registerRpc('create_match', rpcCreateMatch);
   initializer.registerRpc('find_match', rpcFindMatch);
   initializer.registerRpc('list_matches', rpcListMatches);
   initializer.registerRpc('get_user_stats', rpcGetUserStats);
-  initializer.registerRpc('record_game_result', rpcRecordGameResult);
   // Friend invite system
   initializer.registerRpc('send_invite', rpcSendInvite);
   initializer.registerRpc('get_invites', rpcGetInvites);
   initializer.registerRpc('respond_invite', rpcRespondInvite);
   initializer.registerRpc('cancel_invite', rpcCancelInvite);
   initializer.registerRpc('search_users', rpcSearchUsers);
-  // Achievement system
+  // Achievement system (read-only)
   initializer.registerRpc('get_achievements', rpcGetAchievements);
-  initializer.registerRpc('update_achievements', rpcUpdateAchievements);
   // Leaderboard system
   initializer.registerRpc('get_leaderboard', rpcGetLeaderboard);
   // Replay system
   initializer.registerRpc('get_replays', rpcGetReplays);
   initializer.registerRpc('get_replay', rpcGetReplayById);
-  logger.info('Registered RPC endpoints: create_match, find_match, list_matches, get_user_stats, record_game_result, send_invite, get_invites, respond_invite, cancel_invite, search_users, get_achievements, update_achievements, get_leaderboard, get_replays, get_replay');
+  logger.info(`Registered RPC endpoints: ${CLIENT_RPC_IDS.join(', ')}`);
 
   // Register matchmaker callback
   initializer.registerMatchmakerMatched(onMatchmakerMatched);
@@ -362,206 +366,6 @@ function rpcGetUserStats(
     return JSON.stringify({
       success: false,
       error: 'Failed to get user stats',
-    });
-  }
-}
-
-/** Helper to get today's date string (YYYY-MM-DD) */
-function getTodayString(): string {
-  const now = new Date();
-  return now.toISOString().split('T')[0];
-}
-
-/**
- * RPC: Record game result (called by server after game ends)
- * This should be called internally by the match handler
- */
-function rpcRecordGameResult(
-  ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
-  nk: nkruntime.Nakama,
-  payload: string
-): string {
-  if (!payload) {
-    return JSON.stringify({
-      success: false,
-      error: 'No payload provided',
-    });
-  }
-
-  try {
-    const data = JSON.parse(payload);
-    const { players, winner, sheriffId } = data;
-
-    if (!players || !Array.isArray(players)) {
-      return JSON.stringify({
-        success: false,
-        error: 'Invalid players data',
-      });
-    }
-
-    logger.info(`Recording game result for ${players.length} players, winner: ${winner}`);
-
-    const now = Date.now();
-    const today = getTodayString();
-    const writes: nkruntime.StorageWriteRequest[] = [];
-    const levelUpPlayers: Array<{ userId: string; oldLevel: number; newLevel: number; xpGained: number }> = [];
-
-    for (const player of players) {
-      const { userId, role, faction, isWinner, isAlive, isLover } = player;
-
-      // Read existing stats
-      let stats: UserStats;
-      try {
-        const objects = nk.storageRead([{
-          collection: STATS_COLLECTION,
-          key: STATS_KEY,
-          userId: userId,
-        }]);
-
-        if (objects.length > 0 && objects[0].value) {
-          stats = objects[0].value as UserStats;
-          // Migrate old stats that don't have level fields
-          if (stats.level === undefined) {
-            stats.level = 1;
-            stats.currentXP = 0;
-            stats.totalXP = 0;
-            stats.winStreak = 0;
-            stats.maxWinStreak = 0;
-            stats.lastWinDate = '';
-          }
-        } else {
-          stats = createInitialUserStats(userId);
-        }
-      } catch {
-        stats = createInitialUserStats(userId);
-      }
-
-      const oldLevel = stats.level || 1;
-      const wasSheriff = userId === sheriffId;
-      const isFirstWinOfDay = isWinner && stats.lastWinDate !== today;
-
-      // Update win streak
-      if (isWinner) {
-        stats.winStreak = (stats.winStreak || 0) + 1;
-        stats.maxWinStreak = Math.max(stats.maxWinStreak || 0, stats.winStreak);
-        stats.lastWinDate = today;
-      } else {
-        stats.winStreak = 0;
-      }
-
-      // Calculate XP gained
-      const xpGained = calculateGameXP({
-        won: isWinner,
-        survived: isAlive,
-        wasSheriff,
-        sheriffWon: wasSheriff && isWinner,
-        currentWinStreak: stats.winStreak,
-        isFirstWinOfDay,
-      });
-
-      // Update XP and level
-      stats.totalXP = (stats.totalXP || 0) + xpGained;
-      const levelInfo = calculateLevelInfo(stats.totalXP);
-      stats.level = levelInfo.level;
-      stats.currentXP = levelInfo.currentXP;
-
-      // Track level ups
-      if (levelInfo.level > oldLevel) {
-        levelUpPlayers.push({
-          userId,
-          oldLevel,
-          newLevel: levelInfo.level,
-          xpGained,
-        });
-        logger.info(`Player ${userId} leveled up: ${oldLevel} -> ${levelInfo.level}`);
-      }
-
-      // Update total stats
-      stats.totalGames++;
-      if (isWinner) {
-        stats.wins++;
-      } else {
-        stats.losses++;
-      }
-      stats.winRate = stats.totalGames > 0
-        ? Math.round((stats.wins / stats.totalGames) * 100)
-        : 0;
-
-      // Update survival rate (weighted average)
-      const oldSurvivalWeight = (stats.totalGames - 1) * (stats.survivalRate || 0);
-      const newSurvival = isAlive ? 100 : 0;
-      stats.survivalRate = stats.totalGames > 0
-        ? Math.round((oldSurvivalWeight + newSurvival) / stats.totalGames)
-        : 0;
-
-      // Update faction stats
-      if (faction === 'werewolf') {
-        stats.werewolfGames++;
-        if (isWinner) stats.werewolfWins++;
-      } else if (faction === 'villager' || faction === 'neutral') {
-        stats.villagerGames++;
-        if (isWinner) stats.villagerWins++;
-      }
-
-      // Update lover stats
-      if (isLover) {
-        stats.loversGames++;
-        if (isWinner && winner === 'lovers') {
-          stats.loversWins++;
-        }
-      }
-
-      // Update role stats
-      if (role) {
-        if (!stats.roleStats[role]) {
-          stats.roleStats[role] = { played: 0, wins: 0 };
-        }
-        stats.roleStats[role].played++;
-        if (isWinner) {
-          stats.roleStats[role].wins++;
-        }
-      }
-
-      // Update sheriff stats
-      if (wasSheriff) {
-        stats.gamesAsSheriff++;
-        if (isWinner) {
-          stats.sheriffWins++;
-        }
-      }
-
-      // Update timestamps
-      if (stats.firstGameAt === 0) {
-        stats.firstGameAt = now;
-      }
-      stats.lastGameAt = now;
-
-      // Add to write batch
-      writes.push({
-        collection: STATS_COLLECTION,
-        key: STATS_KEY,
-        userId: userId,
-        value: stats,
-        permissionRead: 2, // Public read
-        permissionWrite: 0, // Server-only write
-      });
-    }
-
-    // Write all updates
-    nk.storageWrite(writes);
-    logger.info(`Recorded stats for ${writes.length} players, ${levelUpPlayers.length} leveled up`);
-
-    return JSON.stringify({
-      success: true,
-      playersUpdated: writes.length,
-      levelUps: levelUpPlayers,
-    });
-  } catch (e) {
-    logger.error(`Failed to record game result: ${e}`);
-    return JSON.stringify({
-      success: false,
-      error: `Failed to record game result: ${e}`,
     });
   }
 }
@@ -1074,41 +878,6 @@ function writeInvites(
 // ============================================================================
 // Achievement System RPCs
 // ============================================================================
-
-/**
- * Helper: Read achievements from storage
- */
-function readAchievements(nk: nkruntime.Nakama, userId: string): UserAchievements {
-  try {
-    const objects = nk.storageRead([{
-      collection: ACHIEVEMENT_CONFIG.STORAGE_COLLECTION,
-      key: ACHIEVEMENT_CONFIG.STORAGE_KEY,
-      userId,
-    }]);
-
-    if (objects.length > 0 && objects[0].value) {
-      return objects[0].value as UserAchievements;
-    }
-  } catch {
-    // Return initial achievements if storage doesn't exist
-  }
-  return createInitialUserAchievements(userId);
-}
-
-/**
- * Helper: Write achievements to storage
- */
-function writeAchievements(nk: nkruntime.Nakama, userId: string, achievements: UserAchievements): void {
-  nk.storageWrite([{
-    collection: ACHIEVEMENT_CONFIG.STORAGE_COLLECTION,
-    key: ACHIEVEMENT_CONFIG.STORAGE_KEY,
-    userId,
-    value: achievements as { [key: string]: any },
-    permissionRead: 2, // Public read
-    permissionWrite: 0, // Server only
-  }]);
-}
-
 /**
  * RPC: Get user's achievements
  */
@@ -1187,309 +956,6 @@ function rpcGetAchievements(
     });
   }
 }
-
-/**
- * RPC: Update achievements based on game result (called after recording game result)
- */
-function rpcUpdateAchievements(
-  ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
-  nk: nkruntime.Nakama,
-  payload: string
-): string {
-  if (!payload) {
-    return JSON.stringify({
-      success: false,
-      error: 'No payload provided',
-    });
-  }
-
-  try {
-    const data = JSON.parse(payload);
-    const {
-      userId,
-      won,
-      role,
-      faction,
-      survived,
-      wasSheriff,
-      isLover,
-      loversWon,
-      // Skill tracking (should be tracked during game)
-      seerCheckedWolves = 0,
-      witchSaved = false,
-      witchPoisonedWolf = false,
-      guardSaved = false,
-      hunterKilledWolf = false,
-      idiotRevealed = false,
-      // Game context
-      playerFactionSize = 0,
-      votedOutWolves = 0,
-      wasExposed = false,
-    } = data;
-
-    logger.info(`Updating achievements for user ${userId}, won: ${won}, role: ${role}`);
-
-    // Read user stats and achievements
-    let stats: UserStats;
-    try {
-      const objects = nk.storageRead([{
-        collection: STATS_COLLECTION,
-        key: STATS_KEY,
-        userId,
-      }]);
-      stats = objects.length > 0 && objects[0].value
-        ? objects[0].value as UserStats
-        : createInitialUserStats(userId);
-    } catch {
-      stats = createInitialUserStats(userId);
-    }
-
-    const userAchievements = readAchievements(nk, userId);
-    const newUnlocks: AchievementUnlock[] = [];
-    let totalXPGained = 0;
-
-    // Helper function to check and unlock achievement
-    const checkAndUnlock = (achievementId: AchievementId, currentValue: number) => {
-      const progress = userAchievements.achievements[achievementId] || {
-        achievementId,
-        current: 0,
-        required: ACHIEVEMENT_DEFINITIONS[achievementId].requirement,
-        completed: false,
-      };
-
-      const result = checkAchievementUnlock(progress, currentValue);
-      userAchievements.achievements[achievementId] = result.progress;
-
-      if (result.unlocked) {
-        const definition = ACHIEVEMENT_DEFINITIONS[achievementId];
-        newUnlocks.push({
-          achievement: definition,
-          progress: result.progress,
-          xpEarned: definition.xpReward,
-        });
-        totalXPGained += definition.xpReward;
-        userAchievements.totalUnlocked++;
-        logger.info(`User ${userId} unlocked achievement: ${definition.name}`);
-      }
-    };
-
-    // Helper to increment and check achievement
-    const incrementAndCheck = (achievementId: AchievementId) => {
-      const progress = userAchievements.achievements[achievementId] || {
-        achievementId,
-        current: 0,
-        required: ACHIEVEMENT_DEFINITIONS[achievementId].requirement,
-        completed: false,
-      };
-      if (!progress.completed) {
-        checkAndUnlock(achievementId, progress.current + 1);
-      }
-    };
-
-    // ==================== Check Beginner Achievements ====================
-    // First game
-    checkAndUnlock(AchievementId.FIRST_GAME, stats.totalGames);
-
-    // First win
-    if (won) {
-      checkAndUnlock(AchievementId.FIRST_WIN, stats.wins);
-    }
-
-    // First wolf win
-    if (won && faction === Faction.WEREWOLF) {
-      checkAndUnlock(AchievementId.FIRST_WOLF_WIN, stats.werewolfWins);
-    }
-
-    // First villager win
-    if (won && (faction === Faction.VILLAGER || faction === 'villager')) {
-      checkAndUnlock(AchievementId.FIRST_VILLAGER_WIN, stats.villagerWins);
-    }
-
-    // ==================== Check Games Achievements ====================
-    checkAndUnlock(AchievementId.GAMES_10, stats.totalGames);
-    checkAndUnlock(AchievementId.GAMES_50, stats.totalGames);
-    checkAndUnlock(AchievementId.GAMES_100, stats.totalGames);
-    checkAndUnlock(AchievementId.GAMES_500, stats.totalGames);
-    checkAndUnlock(AchievementId.GAMES_1000, stats.totalGames);
-
-    // ==================== Check Wins Achievements ====================
-    checkAndUnlock(AchievementId.WINS_10, stats.wins);
-    checkAndUnlock(AchievementId.WINS_50, stats.wins);
-    checkAndUnlock(AchievementId.WINS_100, stats.wins);
-    checkAndUnlock(AchievementId.WINS_500, stats.wins);
-
-    // ==================== Check Win Streak Achievements ====================
-    if (won) {
-      checkAndUnlock(AchievementId.WIN_STREAK_3, stats.winStreak);
-      checkAndUnlock(AchievementId.WIN_STREAK_5, stats.winStreak);
-      checkAndUnlock(AchievementId.WIN_STREAK_10, stats.winStreak);
-      checkAndUnlock(AchievementId.WIN_STREAK_20, stats.winStreak);
-    }
-
-    // ==================== Check Role Master Achievements ====================
-    if (won && role) {
-      const roleStats = stats.roleStats[role];
-      if (roleStats) {
-        switch (role) {
-          case Role.VILLAGER:
-            checkAndUnlock(AchievementId.VILLAGER_MASTER, roleStats.wins);
-            break;
-          case Role.SEER:
-            checkAndUnlock(AchievementId.SEER_MASTER, roleStats.wins);
-            break;
-          case Role.WITCH:
-            checkAndUnlock(AchievementId.WITCH_MASTER, roleStats.wins);
-            break;
-          case Role.HUNTER:
-            checkAndUnlock(AchievementId.HUNTER_MASTER, roleStats.wins);
-            break;
-          case Role.GUARD:
-            checkAndUnlock(AchievementId.GUARD_MASTER, roleStats.wins);
-            break;
-          case Role.IDIOT:
-            checkAndUnlock(AchievementId.IDIOT_MASTER, roleStats.wins);
-            break;
-          case Role.WEREWOLF:
-            checkAndUnlock(AchievementId.WEREWOLF_MASTER, roleStats.wins);
-            break;
-          case Role.ALPHA_WOLF:
-            checkAndUnlock(AchievementId.ALPHA_WOLF_MASTER, roleStats.wins);
-            break;
-          case Role.CUPID:
-            checkAndUnlock(AchievementId.CUPID_MASTER, roleStats.wins);
-            break;
-        }
-      }
-    }
-
-    // ==================== Check Skill Achievements ====================
-    // Seer correct checks (cumulative)
-    if (role === Role.SEER && seerCheckedWolves > 0) {
-      const currentProgress = userAchievements.achievements[AchievementId.SEER_CORRECT_10]?.current || 0;
-      const newTotal = currentProgress + seerCheckedWolves;
-      checkAndUnlock(AchievementId.SEER_CORRECT_10, newTotal);
-      checkAndUnlock(AchievementId.SEER_CORRECT_50, newTotal);
-    }
-
-    // Witch saves (cumulative)
-    if (role === Role.WITCH && witchSaved) {
-      incrementAndCheck(AchievementId.WITCH_SAVE_10);
-    }
-
-    // Witch poison wolf (cumulative)
-    if (role === Role.WITCH && witchPoisonedWolf) {
-      incrementAndCheck(AchievementId.WITCH_POISON_WOLF_10);
-    }
-
-    // Guard saves (cumulative)
-    if (role === Role.GUARD && guardSaved) {
-      incrementAndCheck(AchievementId.GUARD_SAVE_10);
-    }
-
-    // Hunter kills wolf (cumulative)
-    if ((role === Role.HUNTER || role === Role.ALPHA_WOLF) && hunterKilledWolf) {
-      incrementAndCheck(AchievementId.HUNTER_KILL_WOLF_10);
-    }
-
-    // ==================== Check Sheriff Achievements ====================
-    if (wasSheriff) {
-      checkAndUnlock(AchievementId.SHERIFF_ELECTED_10, stats.gamesAsSheriff);
-      if (won) {
-        checkAndUnlock(AchievementId.SHERIFF_WIN_10, stats.sheriffWins);
-      }
-    }
-
-    // ==================== Check Special Achievements ====================
-    // Lover victory
-    if (isLover && loversWon) {
-      incrementAndCheck(AchievementId.LOVER_VICTORY);
-    }
-
-    // Idiot reveal survival
-    if (role === Role.IDIOT && idiotRevealed && survived) {
-      incrementAndCheck(AchievementId.IDIOT_REVEAL);
-    }
-
-    // Double kill witch (used both antidote and poison in same game)
-    if (role === Role.WITCH && witchSaved && witchPoisonedWolf) {
-      incrementAndCheck(AchievementId.DOUBLE_KILL_WITCH);
-    }
-
-    // Wolf exterminator (voted out 2+ wolves)
-    if (won && !isWerewolf(role as Role) && votedOutWolves >= 2) {
-      incrementAndCheck(AchievementId.WOLF_EXTERMINATOR);
-    }
-
-    // Silent killer (wolf won without being exposed)
-    if (won && isWerewolf(role as Role) && !wasExposed) {
-      incrementAndCheck(AchievementId.SILENT_KILLER);
-    }
-
-    // Last stand (last villager won)
-    if (won && !isWerewolf(role as Role) && playerFactionSize === 1) {
-      incrementAndCheck(AchievementId.LAST_STAND);
-    }
-
-    // Comeback king (faction was down to 1 and won)
-    if (won && playerFactionSize === 1) {
-      incrementAndCheck(AchievementId.COMEBACK_KING);
-    }
-
-    // ==================== Check Survival Achievements ====================
-    if (survived) {
-      // Count total survivals (need to track this separately)
-      const survivalProgress = userAchievements.achievements[AchievementId.SURVIVOR_10]?.current || 0;
-      const newSurvivals = survivalProgress + 1;
-      checkAndUnlock(AchievementId.SURVIVOR_10, newSurvivals);
-      checkAndUnlock(AchievementId.SURVIVOR_50, newSurvivals);
-    }
-
-    // ==================== Check Level Achievements ====================
-    const levelInfo = calculateLevelInfo(stats.totalXP);
-    checkAndUnlock(AchievementId.LEVEL_10, levelInfo.level);
-    checkAndUnlock(AchievementId.LEVEL_25, levelInfo.level);
-    checkAndUnlock(AchievementId.LEVEL_50, levelInfo.level);
-    checkAndUnlock(AchievementId.LEVEL_75, levelInfo.level);
-    checkAndUnlock(AchievementId.LEVEL_100, levelInfo.level);
-
-    // ==================== Save achievements ====================
-    userAchievements.totalXPFromAchievements += totalXPGained;
-    userAchievements.lastUpdated = Date.now();
-    writeAchievements(nk, userId, userAchievements);
-
-    // If XP was gained from achievements, update user stats
-    if (totalXPGained > 0) {
-      stats.totalXP += totalXPGained;
-      const newLevelInfo = calculateLevelInfo(stats.totalXP);
-      stats.level = newLevelInfo.level;
-      stats.currentXP = newLevelInfo.currentXP;
-
-      nk.storageWrite([{
-        collection: STATS_COLLECTION,
-        key: STATS_KEY,
-        userId,
-        value: stats,
-        permissionRead: 2,
-        permissionWrite: 0,
-      }]);
-    }
-
-    return JSON.stringify({
-      success: true,
-      newUnlocks,
-      totalXPGained,
-      totalUnlocked: userAchievements.totalUnlocked,
-    });
-  } catch (e) {
-    logger.error(`Failed to update achievements: ${e}`);
-    return JSON.stringify({
-      success: false,
-      error: `Failed to update achievements: ${e}`,
-    });
-  }
-}
-
 // ============================================================================
 // Leaderboard System RPCs
 // ============================================================================
