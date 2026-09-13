@@ -39,6 +39,7 @@ import {
   expireAcceptedInviteRetryIfNeeded,
   maybeSweepExpiredInviteSecrets,
   migrateLegacyInvitePasswordIfNeeded,
+  migrateLegacyPasswordsBeforeInviteWrite,
   startInviteSecretExpiryScheduler,
 } from './werewolf/invite-password';
 
@@ -1193,6 +1194,10 @@ function writeInvites(
   invites: GameInvite[]
 ): void {
   const key = type === 'sent' ? INVITE_CONFIG.STORAGE_KEY_SENT : INVITE_CONFIG.STORAGE_KEY_RECEIVED;
+
+  // Migrate legacy inline passwords before strip — sibling list writes must not
+  // destroy still-pending credentials without creating server-only secrets.
+  migrateLegacyPasswordsBeforeInviteWrite(nk, invites);
 
   // Clean up old invites (keep last 50) and never persist passwords in owner-readable storage
   const recentInvites: GameInvite[] = invites.slice(-50).map((invite) =>

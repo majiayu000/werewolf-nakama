@@ -174,6 +174,26 @@ export function migrateLegacyInvitePasswordIfNeeded(
 }
 
 /**
+ * Before sanitizing invite lists for owner-readable storage, migrate any
+ * pre-deployment inline passwords into server-only secrets.
+ *
+ * Unrelated writes of the same receiver/sender list (sibling expire/respond)
+ * must not strip a still-pending legacy credential without creating its secret.
+ */
+export function migrateLegacyPasswordsBeforeInviteWrite(
+  nk: nkruntime.Nakama,
+  invites: LegacyInvitePasswordTarget[]
+): void {
+  for (const invite of invites) {
+    if (typeof invite.password !== 'string' || invite.password.length === 0) {
+      continue;
+    }
+    const secretResult = readInviteSecretResult(nk, invite.inviteId, invite.receiverId);
+    migrateLegacyInvitePasswordIfNeeded(nk, invite, secretResult);
+  }
+}
+
+/**
  * Delete invite password from server-only storage (cancel / decline / expire / accept).
  */
 export function deleteInviteSecret(

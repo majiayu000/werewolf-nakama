@@ -21,6 +21,7 @@ import {
   sweepExpiredInviteSecretsFromStorage,
   maybeSweepExpiredInviteSecrets,
   migrateLegacyInvitePasswordIfNeeded,
+  migrateLegacyPasswordsBeforeInviteWrite,
   resetInviteSecretSweepClockForTests,
   startInviteSecretExpiryScheduler,
 } from '../werewolf/invite-password';
@@ -400,6 +401,39 @@ describe('invite secret storage', () => {
       password: 'old-inline-pass',
       expiresAt: invite.expiresAt,
     });
+  });
+
+  it('migrates sibling legacy invites before a list write strips passwords', () => {
+    const { nk, store } = createMockNk();
+    const expiresAt = Date.now() + 60_000;
+    const invites = [
+      {
+        inviteId: 'inv_sibling_legacy',
+        receiverId: 'receiver-list',
+        password: 'keep-me',
+        status: 'pending',
+        expiresAt,
+      },
+      {
+        inviteId: 'inv_unrelated',
+        receiverId: 'receiver-list',
+        status: 'expired',
+        expiresAt: Date.now() - 1,
+      },
+    ];
+
+    migrateLegacyPasswordsBeforeInviteWrite(nk, invites);
+
+    expect(invites[0].requiresPassword).toBe(true);
+    expect(invites[0].password).toBeUndefined();
+    expect(store.get(`${INVITE_SECRET_COLLECTION}:receiver-list:inv_sibling_legacy`)?.value).toEqual({
+      password: 'keep-me',
+      expiresAt,
+    });
+
+    const sanitized = invites.map((invite) => stripInvitePassword(invite));
+    expect('password' in sanitized[0]).toBe(false);
+    expect(sanitized[0].requiresPassword).toBe(true);
   });
 
   it('does not migrate when a server-only secret already exists', () => {
