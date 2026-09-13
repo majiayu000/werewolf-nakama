@@ -5,8 +5,13 @@
 import { describe, it, expect } from 'bun:test';
 import {
   INVITE_PASSWORD_SIGNAL_TYPE,
+  INVITE_SECRET_COLLECTION,
   resolveInvitePassword,
   handleInvitePasswordSignal,
+  stripInvitePassword,
+  writeInviteSecret,
+  readInviteSecret,
+  deleteInviteSecret,
 } from '../werewolf/invite-password';
 
 function createState(password: string | null, playerIds: string[]) {
@@ -15,6 +20,57 @@ function createState(password: string | null, playerIds: string[]) {
     players.set(id, {});
   }
   return { password, players };
+}
+
+function createMockNk() {
+  const store = new Map<string, { permissionRead: number; permissionWrite: number; value: unknown }>();
+  const keyOf = (collection: string, key: string, userId: string) =>
+    `${collection}:${userId}:${key}`;
+
+  return {
+    store,
+    nk: {
+      storageWrite(writes: Array<{
+        collection: string;
+        key: string;
+        userId: string;
+        value: unknown;
+        permissionRead?: number;
+        permissionWrite?: number;
+      }>) {
+        for (const write of writes) {
+          store.set(keyOf(write.collection, write.key, write.userId), {
+            permissionRead: write.permissionRead ?? 1,
+            permissionWrite: write.permissionWrite ?? 0,
+            value: write.value,
+          });
+        }
+        return [];
+      },
+      storageRead(reads: Array<{ collection: string; key: string; userId: string }>) {
+        return reads.flatMap((read) => {
+          const entry = store.get(keyOf(read.collection, read.key, read.userId));
+          if (!entry) return [];
+          return [{
+            collection: read.collection,
+            key: read.key,
+            userId: read.userId,
+            value: entry.value,
+            permissionRead: entry.permissionRead,
+            permissionWrite: entry.permissionWrite,
+            version: '1',
+            createTime: 0,
+            updateTime: 0,
+          }];
+        });
+      },
+      storageDelete(deletes: Array<{ collection: string; key: string; userId: string }>) {
+        for (const del of deletes) {
+          store.delete(keyOf(del.collection, del.key, del.userId));
+        }
+      },
+    } as unknown as nkruntime.Nakama,
+  };
 }
 
 describe('resolveInvitePassword', () => {
@@ -74,5 +130,50 @@ describe('handleInvitePasswordSignal', () => {
     const state = createState('room-pass', ['member-1']);
     expect(handleInvitePasswordSignal(state, JSON.stringify({ type: 'other' }))).toBeNull();
     expect(handleInvitePasswordSignal(state, 'not-json')).toBeNull();
+  });
+});
+
+describe('invite secret storage', () => {
+  it('strips password from invite metadata objects', () => {
+    const stripped = stripInvitePassword({
+      inviteId: 'inv_1',
+      matchId: 'match_1',
+      password: 'should-not-leak',
+      status: 'pending',
+    });
+    expect(stripped).toEqual({
+      inviteId: 'inv_1',
+      matchId: 'match_1',
+      status: 'pending',
+    });
+    expect('password' in stripped).toBe(false);
+  });
+
+  it('writes secrets with permissionRead 0 so clients cannot read them', () => {
+    const { nk, store } = createMockNk();
+    writeInviteSecret(nk, 'inv_abc', 'receiver-1', 'room-secret');
+
+    const entry = store.get(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_abc`);
+    expect(entry).toBeDefined();
+    expect(entry!.permissionRead).toBe(0);
+    expect(entry!.permissionWrite).toBe(0);
+    expect(entry!.value).toEqual({ password: 'room-secret' });
+  });
+
+  it('skips writing secrets for public rooms', () => {
+    const { nk, store } = createMockNk();
+    writeInviteSecret(nk, 'inv_public', 'receiver-1', null);
+    writeInviteSecret(nk, 'inv_empty', 'receiver-1', undefined);
+    writeInviteSecret(nk, 'inv_blank', 'receiver-1', '');
+    expect(store.size).toBe(0);
+  });
+
+  it('reads and deletes invite secrets', () => {
+    const { nk } = createMockNk();
+    writeInviteSecret(nk, 'inv_xyz', 'receiver-2', 'join-me');
+    expect(readInviteSecret(nk, 'inv_xyz', 'receiver-2')).toBe('join-me');
+
+    deleteInviteSecret(nk, 'inv_xyz', 'receiver-2');
+    expect(readInviteSecret(nk, 'inv_xyz', 'receiver-2')).toBeUndefined();
   });
 });

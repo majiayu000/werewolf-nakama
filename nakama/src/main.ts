@@ -30,6 +30,10 @@ import {
 import {
   INVITE_PASSWORD_SIGNAL_TYPE,
   InvitePasswordSignalResponse,
+  stripInvitePassword,
+  writeInviteSecret,
+  readInviteSecret,
+  deleteInviteSecret,
 } from './werewolf/invite-password';
 
 // Storage collection for user stats
@@ -735,10 +739,11 @@ function rpcSendInvite(
     }
     const receiver = receiverUsers[0];
 
-    // Create invite
+    // Create invite metadata without password (credential stored server-only below)
     const now = Date.now();
+    const inviteId = generateInviteId();
     const invite: GameInvite = {
-      inviteId: generateInviteId(),
+      inviteId,
       matchId,
       roomName: matchLabel.roomName || `房间 ${matchId.slice(-6)}`,
       senderId: ctx.userId,
@@ -750,9 +755,10 @@ function rpcSendInvite(
       maxPlayers: matchLabel.maxPlayers || 12,
       createdAt: now,
       expiresAt: now + INVITE_CONFIG.EXPIRE_TIME,
-      // Store password for accept-time return only (stripped from notifications/get_invites)
-      password: invitePassword ?? undefined,
     };
+
+    // Keep join password in server-only storage; never put it in owner-readable invite objects
+    writeInviteSecret(nk, inviteId, receiverId, invitePassword);
 
     // Store invite for sender (sent invites)
     const senderInvites = readInvites(nk, ctx.userId, 'sent');
@@ -770,10 +776,7 @@ function rpcSendInvite(
       subject: 'game_invite',
       content: {
         type: 'game_invite',
-        invite: {
-          ...invite,
-          password: undefined, // Don't include password in notification
-        },
+        invite,
       },
       code: 81, // OpCode.INVITE_RECEIVED
       persistent: true,
@@ -819,13 +822,12 @@ function rpcGetInvites(
       if (invite.status === InviteStatus.PENDING && invite.expiresAt < now) {
         invite.status = InviteStatus.EXPIRED;
         hasExpired = true;
+        // Drop server-only credential once the invite can no longer be accepted
+        deleteInviteSecret(nk, invite.inviteId, invite.receiverId);
       }
-      // Only return pending invites by default
+      // Only return pending invites by default (password never lives on invite objects)
       if (invite.status === InviteStatus.PENDING) {
-        validInvites.push({
-          ...invite,
-          password: undefined, // Don't expose password in list
-        });
+        validInvites.push(stripInvitePassword(invite));
       }
     }
 
@@ -901,11 +903,17 @@ function rpcRespondInvite(
     if (invite.expiresAt < now) {
       invite.status = InviteStatus.EXPIRED;
       writeInvites(nk, ctx.userId, 'received', invites);
+      deleteInviteSecret(nk, inviteId, invite.receiverId);
       return JSON.stringify({
         success: false,
         error: 'Invite has expired',
       });
     }
+
+    // Reveal password only on successful accept, from server-only storage
+    const acceptPassword = accept
+      ? readInviteSecret(nk, inviteId, invite.receiverId)
+      : undefined;
 
     // Update invite status
     const newStatus = accept ? InviteStatus.ACCEPTED : InviteStatus.DECLINED;
@@ -919,6 +927,9 @@ function rpcRespondInvite(
       senderInvites[senderInviteIndex].status = newStatus;
       writeInvites(nk, invite.senderId, 'sent', senderInvites);
     }
+
+    // Always drop the server-only credential after a terminal response
+    deleteInviteSecret(nk, inviteId, invite.receiverId);
 
     // Notify sender about the response
     const notificationCode = accept ? 82 : 83; // INVITE_ACCEPTED or INVITE_DECLINED
@@ -943,7 +954,7 @@ function rpcRespondInvite(
       return JSON.stringify({
         success: true,
         matchId: invite.matchId,
-        password: invite.password, // Return password for private rooms
+        password: acceptPassword, // From server-only storage; never from invite list objects
       });
     }
 
@@ -1019,6 +1030,9 @@ function rpcCancelInvite(
       writeInvites(nk, invite.receiverId, 'received', receiverInvites);
     }
 
+    // Revoke join credential so cancelled invites cannot recover the password
+    deleteInviteSecret(nk, inviteId, invite.receiverId);
+
     // Notify receiver about cancellation
     const notifications: nkruntime.NotificationRequest[] = [{
       userId: invite.receiverId,
@@ -1085,15 +1099,17 @@ function writeInvites(
 ): void {
   const key = type === 'sent' ? INVITE_CONFIG.STORAGE_KEY_SENT : INVITE_CONFIG.STORAGE_KEY_RECEIVED;
 
-  // Clean up old invites (keep last 50)
-  const recentInvites = invites.slice(-50);
+  // Clean up old invites (keep last 50) and never persist passwords in owner-readable storage
+  const recentInvites: GameInvite[] = invites.slice(-50).map((invite) =>
+    stripInvitePassword(invite) as GameInvite
+  );
 
   nk.storageWrite([{
     collection: INVITE_CONFIG.STORAGE_COLLECTION,
     key,
     userId,
     value: { invites: recentInvites },
-    permissionRead: 1, // Owner only
+    permissionRead: 1, // Owner only — invite metadata; passwords live in INVITE_SECRET_COLLECTION
     permissionWrite: 0, // Server only
   }]);
 }

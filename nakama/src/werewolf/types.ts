@@ -925,7 +925,7 @@ export interface GameInvite {
   maxPlayers: number;         // 房间最大人数
   createdAt: number;          // 创建时间戳
   expiresAt: number;          // 过期时间戳
-  password?: string;          // 私密房间密码（仅发送给被邀请者）
+  password?: string;          // Deprecated on stored invites — join password lives in server-only secrets
 }
 
 /** 创建邀请请求 */
