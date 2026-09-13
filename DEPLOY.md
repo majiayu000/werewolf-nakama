@@ -68,11 +68,16 @@ npm run build
 # 返回项目根目录
 cd ..
 
-# 启动 Docker 服务（Nakama + CockroachDB）
-docker-compose up -d
+# 配置本地密钥（必需；.env 已 gitignore，勿提交）
+cp .env.example .env
+# 编辑 .env，为 NAKAMA_CONSOLE_* 与 NAKAMA_RUNTIME_HTTP_KEY 设置强随机值
+
+# 启动 Docker 服务（Nakama + CockroachDB，本地开发）
+# 注意：Cockroach 使用 --insecure，仅适用于本机开发；共享/生产环境需另行配置 TLS/认证
+docker compose --env-file .env up -d
 
 # 查看日志
-docker-compose logs -f nakama
+docker compose logs -f nakama
 ```
 
 ### 3. 启动前端开发服务器
@@ -90,18 +95,17 @@ npm run dev
 
 ### 4. 访问服务
 
-| 服务 | 地址 |
-|------|------|
-| 前端应用 | http://localhost:3000 |
-| Nakama HTTP API | http://localhost:7350 |
-| Nakama Console | http://localhost:7351 |
-| Nakama gRPC | http://localhost:7349 |
-| CockroachDB Console | http://localhost:8080 |
+| 服务 | 地址 | 绑定 |
+|------|------|------|
+| 前端应用 | http://localhost:3000 | — |
+| Nakama HTTP API | http://localhost:7350 | 全接口（开发） |
+| Nakama Console | http://localhost:7351 | `127.0.0.1` only |
+| Nakama gRPC | http://localhost:7349 | 全接口（开发） |
+| CockroachDB Console | http://localhost:8080 | `127.0.0.1` only |
+| CockroachDB SQL | localhost:26257 | `127.0.0.1` only |
 
-Nakama 控制台默认凭证：
-- 用户名: `admin`
-- 密码: `password`
-
+Nakama 控制台凭证来自 `.env`（见 `.env.example`），仓库不再提交默认账号密码。
+历史上曾提交过的弱密钥如仍在线上使用，请立即轮换。
 ### 5. 运行测试
 
 ```bash
@@ -120,25 +124,26 @@ npm run test:watch
 
 ### 基础部署
 
-项目已包含 `docker-compose.yml` 配置，可直接使用：
+项目已包含本地开发用 `docker-compose.yml`（需先配置 `.env`）：
 
 ```bash
+cp .env.example .env   # 首次：填入强随机密钥
 # 构建并启动所有服务
-docker-compose up -d --build
+docker compose --env-file .env up -d --build
 
 # 查看服务状态
-docker-compose ps
+docker compose ps
 
 # 查看日志
-docker-compose logs -f
+docker compose logs -f
 ```
 
 ### 服务说明
 
-| 服务 | 镜像 | 端口 |
-|------|------|------|
-| nakama | registry.heroiclabs.com/heroiclabs/nakama:3.21.1 | 7349, 7350, 7351 |
-| cockroachdb | cockroachdb/cockroach:v23.1.11 | 26257, 8080 |
+| 服务 | 镜像 | 端口（宿主机） |
+|------|------|----------------|
+| nakama | registry.heroiclabs.com/heroiclabs/nakama:3.21.1 | 7349, 7350；控制台 `127.0.0.1:7351` |
+| cockroachdb | cockroachdb/cockroach:v23.1.11 | `127.0.0.1:26257` / `127.0.0.1:8080`（`--insecure`，仅本地） |
 
 ### 数据持久化
 
@@ -200,7 +205,12 @@ services:
       - "-ecx"
       - >
         /nakama/nakama migrate up --database.address root@cockroachdb:26257 &&
-        exec /nakama/nakama --config /nakama/data/nakama-config.yml --database.address root@cockroachdb:26257
+        exec /nakama/nakama --config /nakama/data/nakama-config.yml
+        --database.address root@cockroachdb:26257
+        --console.username "$$NAKAMA_CONSOLE_USERNAME"
+        --console.password "$$NAKAMA_CONSOLE_PASSWORD"
+        --console.signing_key "$$NAKAMA_CONSOLE_SIGNING_KEY"
+        --runtime.http_key "$$NAKAMA_RUNTIME_HTTP_KEY"
     restart: always
     depends_on:
       cockroachdb:
@@ -214,6 +224,10 @@ services:
       - werewolf-network
     environment:
       - TZ=Asia/Shanghai
+      - NAKAMA_CONSOLE_USERNAME=${NAKAMA_CONSOLE_USERNAME:?required}
+      - NAKAMA_CONSOLE_PASSWORD=${NAKAMA_CONSOLE_PASSWORD:?required}
+      - NAKAMA_CONSOLE_SIGNING_KEY=${NAKAMA_CONSOLE_SIGNING_KEY:?required}
+      - NAKAMA_RUNTIME_HTTP_KEY=${NAKAMA_RUNTIME_HTTP_KEY:?required}
 
   nginx:
     image: nginx:alpine
@@ -259,7 +273,7 @@ metrics:
 
 runtime:
   js_entrypoint: build/index.js
-  http_key: <YOUR_SECURE_HTTP_KEY>
+  # http_key 通过 --runtime.http_key / 环境变量注入，勿写入仓库
   env:
     - GAME_NAME=werewolf
     - MIN_PLAYERS=6
@@ -284,10 +298,11 @@ match:
 console:
   port: 7351
   address: "127.0.0.1"
-  username: admin
-  password: <YOUR_SECURE_PASSWORD>
-  signing_key: <YOUR_SECURE_SIGNING_KEY>
+  # username / password / signing_key 通过 CLI 与环境变量注入，勿写入仓库
 ```
+
+生产环境务必使用密钥管理或 `.env`（勿提交）提供 `NAKAMA_CONSOLE_*` 与 `NAKAMA_RUNTIME_HTTP_KEY`。
+共享/生产环境的 Cockroach 应启用 TLS 与认证；本仓库 compose 的 `--insecure` 仅用于本地开发。
 
 #### 3. 创建 Nginx 配置
 
@@ -419,7 +434,16 @@ kubectl apply -f k8s/ingress.yaml
 
 ## 环境变量配置
 
-### Nakama 配置
+### Nakama 密钥（必需，见 `.env.example`）
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `NAKAMA_CONSOLE_USERNAME` | 控制台用户名 | 无（必须设置） |
+| `NAKAMA_CONSOLE_PASSWORD` | 控制台密码 | 无（必须设置） |
+| `NAKAMA_CONSOLE_SIGNING_KEY` | 控制台会话签名密钥 | 无（必须设置） |
+| `NAKAMA_RUNTIME_HTTP_KEY` | Runtime HTTP key | 无（必须设置） |
+
+### Nakama 游戏配置
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|

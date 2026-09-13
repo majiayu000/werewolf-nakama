@@ -12,7 +12,7 @@ metrics:
 
 runtime:
   js_entrypoint: index.js
-  http_key: werewolf_server_key
+  # http_key must be supplied via --runtime.http_key (see docker-compose / .env)
   env:
     - GAME_NAME=werewolf
     - MIN_PLAYERS=6
@@ -50,6 +50,5 @@ console:
   read_timeout_ms: 10000
   write_timeout_ms: 60000
   idle_timeout_ms: 300000
-  username: admin
-  password: password
-  signing_key: console_signing_key_change_in_production
+  # username, password, and signing_key must be supplied via CLI flags
+  # (--console.username / --console.password / --console.signing_key)

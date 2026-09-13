@@ -81,9 +81,13 @@ cd nakama
 npm install
 npm run build
 
-# Start Nakama + CockroachDB
+# Configure local secrets (required — never commit .env)
 cd ..
-docker-compose up -d
+cp .env.example .env
+# Edit .env and set strong values for NAKAMA_CONSOLE_* and NAKAMA_RUNTIME_HTTP_KEY
+
+# Start Nakama + CockroachDB (local-dev compose: Cockroach --insecure)
+docker compose --env-file .env up -d
 ```
 
 ### 2. Start Frontend Development Server
@@ -97,15 +101,17 @@ npm run dev
 ### 3. Access the Application
 
 - **Game**: http://localhost:5173
-- **Nakama Console**: http://localhost:7351 (admin/password)
+- **Nakama Console**: http://localhost:7351 (credentials from `.env`; bound to 127.0.0.1)
 - **Nakama API**: http://localhost:7350
+- **CockroachDB UI**: http://localhost:8080 (bound to 127.0.0.1; `--insecure` is local-only)
 
 ## Project Structure
 
 ```
 workspace/
-├── docker-compose.yml      # Docker services configuration
-├── nakama-config.yml       # Nakama server configuration
+├── docker-compose.yml      # Docker services configuration (local-dev)
+├── .env.example            # Required Nakama console/http secret template
+├── nakama-config.yml       # Nakama server configuration (no committed secrets)
 ├── nakama/                 # Backend (Nakama TypeScript)
 │   ├── package.json
 │   ├── tsconfig.json
@@ -296,12 +302,16 @@ See [DEPLOY.md](./DEPLOY.md) for detailed deployment instructions including:
 
 ### Environment Variables
 
-**Backend (Nakama)**
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `NAKAMA_CONSOLE_USERNAME` | Admin console username | admin |
-| `NAKAMA_CONSOLE_PASSWORD` | Admin console password | password |
-| `DB_HOST` | Database host | cockroachdb |
+**Backend (Nakama)** — copy `.env.example` to `.env` (gitignored). Compose fails if these are unset.
+| Variable | Description | Notes |
+|----------|-------------|-------|
+| `NAKAMA_CONSOLE_USERNAME` | Admin console username | Required; no committed default |
+| `NAKAMA_CONSOLE_PASSWORD` | Admin console password | Required; set a strong local value |
+| `NAKAMA_CONSOLE_SIGNING_KEY` | Console session signing key | Required; use a long random string |
+| `NAKAMA_RUNTIME_HTTP_KEY` | Nakama runtime HTTP key | Required; use a long random string |
+| `DB_HOST` | Database host | Default in runtime: `cockroachdb` |
+
+Console (`7351`) and Cockroach (`26257`/`8080`) publish on `127.0.0.1` only. Single-node Cockroach `--insecure` is for local development; shared/prod deploys need TLS/auth (see [DEPLOY.md](./DEPLOY.md)).
 
 **Frontend**
 | Variable | Description | Default |

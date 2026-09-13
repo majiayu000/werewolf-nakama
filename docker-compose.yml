@@ -1,5 +1,9 @@
 version: '3.8'
 
+# Local development stack only.
+# CockroachDB uses --insecure (no TLS/auth). Do not expose this compose file
+# on a shared or production host without a follow-up TLS/auth deployment.
+
 services:
   cockroachdb:
     image: cockroachdb/cockroach:v23.1.11
@@ -12,8 +16,9 @@ services:
       - "8080"
       - "26257"
     ports:
-      - "26257:26257"
-      - "8080:8080"
+      # Bind DB / admin UI to localhost only (local-dev)
+      - "127.0.0.1:26257:26257"
+      - "127.0.0.1:8080:8080"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health?ready=1"]
       interval: 10s
@@ -29,7 +34,13 @@ services:
       - "-ecx"
       - >
         /nakama/nakama migrate up --database.address root@cockroachdb:26257 &&
-        exec /nakama/nakama --config /nakama/data/nakama-config.yml --database.address root@cockroachdb:26257
+        exec /nakama/nakama
+        --config /nakama/data/nakama-config.yml
+        --database.address root@cockroachdb:26257
+        --console.username "$$NAKAMA_CONSOLE_USERNAME"
+        --console.password "$$NAKAMA_CONSOLE_PASSWORD"
+        --console.signing_key "$$NAKAMA_CONSOLE_SIGNING_KEY"
+        --runtime.http_key "$$NAKAMA_RUNTIME_HTTP_KEY"
     restart: unless-stopped
     depends_on:
       cockroachdb:
@@ -44,7 +55,8 @@ services:
     ports:
       - "7349:7349"  # gRPC API
       - "7350:7350"  # HTTP API
-      - "7351:7351"  # Developer Console
+      # Developer console: localhost only
+      - "127.0.0.1:7351:7351"
     healthcheck:
       test: ["CMD", "/nakama/nakama", "healthcheck"]
       interval: 10s
@@ -53,6 +65,10 @@ services:
       start_period: 30s
     environment:
       - TZ=Asia/Shanghai
+      - NAKAMA_CONSOLE_USERNAME=${NAKAMA_CONSOLE_USERNAME:?Set NAKAMA_CONSOLE_USERNAME in .env (see .env.example)}
+      - NAKAMA_CONSOLE_PASSWORD=${NAKAMA_CONSOLE_PASSWORD:?Set NAKAMA_CONSOLE_PASSWORD in .env (see .env.example)}
+      - NAKAMA_CONSOLE_SIGNING_KEY=${NAKAMA_CONSOLE_SIGNING_KEY:?Set NAKAMA_CONSOLE_SIGNING_KEY in .env (see .env.example)}
+      - NAKAMA_RUNTIME_HTTP_KEY=${NAKAMA_RUNTIME_HTTP_KEY:?Set NAKAMA_RUNTIME_HTTP_KEY in .env (see .env.example)}
 
 volumes:
   cockroachdb_data:
