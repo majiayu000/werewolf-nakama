@@ -20,6 +20,7 @@ import {
   expireAcceptedInviteRetryIfNeeded,
   sweepExpiredInviteSecretsFromStorage,
   maybeSweepExpiredInviteSecrets,
+  migrateLegacyInvitePasswordIfNeeded,
   resetInviteSecretSweepClockForTests,
   startInviteSecretExpiryScheduler,
 } from '../werewolf/invite-password';
@@ -375,6 +376,50 @@ describe('invite secret storage', () => {
     expect(maybeSweepExpiredInviteSecrets(nk, now + 1_000, 60_000)).toBeNull();
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_b`)).toBe(true);
     expect(maybeSweepExpiredInviteSecrets(nk, now + 60_000, 60_000)).toEqual(['inv_b']);
+  });
+
+  it('migrates legacy inline passwords into server-only secret storage', () => {
+    const { nk, store } = createMockNk();
+    const invite = {
+      inviteId: 'inv_legacy',
+      receiverId: 'receiver-legacy',
+      password: 'old-inline-pass',
+      expiresAt: Date.now() + 60_000,
+    };
+
+    const migrated = migrateLegacyInvitePasswordIfNeeded(
+      nk,
+      invite,
+      { status: 'missing' }
+    );
+
+    expect(migrated).toEqual({ status: 'found', password: 'old-inline-pass' });
+    expect(invite.requiresPassword).toBe(true);
+    expect(invite.password).toBeUndefined();
+    expect(store.get(`${INVITE_SECRET_COLLECTION}:receiver-legacy:inv_legacy`)?.value).toEqual({
+      password: 'old-inline-pass',
+      expiresAt: invite.expiresAt,
+    });
+  });
+
+  it('does not migrate when a server-only secret already exists', () => {
+    const { nk } = createMockNk();
+    writeInviteSecret(nk, 'inv_present', 'receiver-1', 'secret-pass', Date.now() + 60_000);
+    const invite = {
+      inviteId: 'inv_present',
+      receiverId: 'receiver-1',
+      password: 'stale-inline',
+      requiresPassword: true,
+    };
+
+    const result = migrateLegacyInvitePasswordIfNeeded(
+      nk,
+      invite,
+      { status: 'found', password: 'secret-pass' }
+    );
+
+    expect(result).toEqual({ status: 'found', password: 'secret-pass' });
+    expect(invite.password).toBe('stale-inline');
   });
 
   it('registers a recurring leaderboard-reset scheduler for idle-server expiry', () => {

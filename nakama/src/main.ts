@@ -38,6 +38,7 @@ import {
   reclaimExpiredInviteSecrets,
   expireAcceptedInviteRetryIfNeeded,
   maybeSweepExpiredInviteSecrets,
+  migrateLegacyInvitePasswordIfNeeded,
   startInviteSecretExpiryScheduler,
 } from './werewolf/invite-password';
 
@@ -933,7 +934,12 @@ function rpcRespondInvite(
             error: 'Invite has expired',
           });
         }
-        const retrySecret = readInviteSecretResult(nk, inviteId, invite.receiverId);
+        const retrySecretRaw = readInviteSecretResult(nk, inviteId, invite.receiverId);
+        const hadLegacyInlinePassword =
+          retrySecretRaw.status !== 'found' &&
+          typeof invite.password === 'string' &&
+          invite.password.length > 0;
+        const retrySecret = migrateLegacyInvitePasswordIfNeeded(nk, invite, retrySecretRaw);
         if (invite.requiresPassword && retrySecret.status !== 'found') {
           return JSON.stringify({
             success: false,
@@ -941,6 +947,9 @@ function rpcRespondInvite(
               ? 'Invite credential temporarily unavailable'
               : 'Invite credential missing',
           });
+        }
+        if (hadLegacyInlinePassword) {
+          writeInvites(nk, ctx.userId, 'received', invites);
         }
         return JSON.stringify({
           success: true,
@@ -967,9 +976,11 @@ function rpcRespondInvite(
 
     // Reveal password only on successful accept, from server-only storage.
     // Private invites must not be marked accepted if the credential is missing/unreadable.
+    // Pre-deployment invites may still carry an inline password with no secret object.
     let acceptPassword: string | undefined;
     if (accept) {
-      const secretResult = readInviteSecretResult(nk, inviteId, invite.receiverId);
+      let secretResult = readInviteSecretResult(nk, inviteId, invite.receiverId);
+      secretResult = migrateLegacyInvitePasswordIfNeeded(nk, invite, secretResult);
       if (invite.requiresPassword) {
         if (secretResult.status !== 'found') {
           logger.error(
@@ -1189,7 +1200,7 @@ function writeInvites(
   );
 
   // Opportunistic expiry reclaim on writes; independent sweep also runs from
-  // invite RPCs / InitModule / matchLoop (match-independent paths included).
+  // invite RPCs / InitModule / leaderboard-reset scheduler (not matchLoop).
   reclaimExpiredInviteSecrets(nk, recentInvites);
 
   // Persist eviction first. Only after the write succeeds reclaim secrets for

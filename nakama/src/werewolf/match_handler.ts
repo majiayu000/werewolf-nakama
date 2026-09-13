@@ -38,7 +38,7 @@ import {
 } from './anti-cheat';
 import { logger as gameLogger, LogCategory, startTimer } from './logger';
 import { metrics, MetricNames, createMatchMetrics, MatchMetrics } from './metrics';
-import { handleInvitePasswordSignal, maybeSweepExpiredInviteSecrets } from './invite-password';
+import { handleInvitePasswordSignal } from './invite-password';
 import { createGameEventLogger, GameEventLogger, GameEventType } from './game-events';
 import {
   ReplayBuffer, ReplayPlayer, ReplayConfig, saveReplay, createReplayBuffer
@@ -1180,10 +1180,8 @@ matchLoop = function matchLoop(
       transitionPhase(gameState, dispatcher, logger);
     }
 
-    // Opportunistic invite-secret expiry sweep while matches are live.
-    // Match-independent callers (InitModule + invite RPCs) also run this
-    // throttled sweeper so idle servers still reclaim expired credentials.
-    maybeSweepExpiredInviteSecrets(nk, now);
+    // Invite-secret expiry sweeps stay off matchLoop (leaderboard scheduler +
+    // invite RPCs / InitModule handle collection-wide reclaim).
 
     // Check win condition (skip during death skill phase - will be checked after)
     if (gameState.phase !== GamePhase.WAITING &&

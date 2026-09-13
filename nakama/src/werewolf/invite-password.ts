@@ -130,6 +130,49 @@ export function readInviteSecret(
   return result.status === 'found' ? result.password : undefined;
 }
 
+/** Pre-secret-storage invite shape that may still carry an inline password. */
+export interface LegacyInvitePasswordTarget {
+  inviteId: string;
+  receiverId: string;
+  password?: string;
+  requiresPassword?: boolean;
+  expiresAt?: number;
+}
+
+/**
+ * Migrate a pre-deployment private invite that still has an inline `password`
+ * and no server-only secret object.
+ *
+ * Without this, accept treats the invite as public (no `requiresPassword`),
+ * `writeInvites` strips the only credential, and the client cannot join or retry.
+ * Mutates the invite to set `requiresPassword` and clear the inline password.
+ */
+export function migrateLegacyInvitePasswordIfNeeded(
+  nk: nkruntime.Nakama,
+  invite: LegacyInvitePasswordTarget,
+  secretResult: InviteSecretReadResult
+): InviteSecretReadResult {
+  if (secretResult.status === 'found') {
+    return secretResult;
+  }
+
+  const legacyPassword = invite.password;
+  if (typeof legacyPassword !== 'string' || legacyPassword.length === 0) {
+    return secretResult;
+  }
+
+  writeInviteSecret(
+    nk,
+    invite.inviteId,
+    invite.receiverId,
+    legacyPassword,
+    invite.expiresAt
+  );
+  invite.requiresPassword = true;
+  delete invite.password;
+  return { status: 'found', password: legacyPassword };
+}
+
 /**
  * Delete invite password from server-only storage (cancel / decline / expire / accept).
  */
@@ -316,7 +359,8 @@ export function sweepExpiredInviteSecretsFromStorage(
 
 /**
  * Throttled collection sweep suitable for match-independent RPC callers
- * and opportunistic matchLoop ticks.
+ * (InitModule, invite RPCs). Full sweeps stay off the latency-sensitive
+ * matchLoop — the leaderboard-reset scheduler covers idle-server expiry.
  * Returns reclaimed invite IDs, or null when the interval has not elapsed.
  */
 export function maybeSweepExpiredInviteSecrets(
