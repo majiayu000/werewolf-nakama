@@ -32,8 +32,10 @@ import {
   InvitePasswordSignalResponse,
   stripInvitePassword,
   writeInviteSecret,
-  readInviteSecret,
+  readInviteSecretResult,
   deleteInviteSecret,
+  reclaimSecretsForRemovedInvites,
+  reclaimExpiredInviteSecrets,
 } from './werewolf/invite-password';
 
 // Storage collection for user stats
@@ -742,6 +744,8 @@ function rpcSendInvite(
     // Create invite metadata without password (credential stored server-only below)
     const now = Date.now();
     const inviteId = generateInviteId();
+    const expiresAt = now + INVITE_CONFIG.EXPIRE_TIME;
+    const requiresPassword = !!invitePassword;
     const invite: GameInvite = {
       inviteId,
       matchId,
@@ -754,11 +758,12 @@ function rpcSendInvite(
       currentPlayers: match.size,
       maxPlayers: matchLabel.maxPlayers || 12,
       createdAt: now,
-      expiresAt: now + INVITE_CONFIG.EXPIRE_TIME,
+      expiresAt,
+      requiresPassword,
     };
 
     // Keep join password in server-only storage; never put it in owner-readable invite objects
-    writeInviteSecret(nk, inviteId, receiverId, invitePassword);
+    writeInviteSecret(nk, inviteId, receiverId, invitePassword, expiresAt);
 
     // Store invite for sender (sent invites)
     const senderInvites = readInvites(nk, ctx.userId, 'sent');
@@ -910,10 +915,28 @@ function rpcRespondInvite(
       });
     }
 
-    // Reveal password only on successful accept, from server-only storage
-    const acceptPassword = accept
-      ? readInviteSecret(nk, inviteId, invite.receiverId)
-      : undefined;
+    // Reveal password only on successful accept, from server-only storage.
+    // Private invites must not be marked accepted if the credential is missing/unreadable.
+    let acceptPassword: string | undefined;
+    if (accept) {
+      const secretResult = readInviteSecretResult(nk, inviteId, invite.receiverId);
+      if (invite.requiresPassword) {
+        if (secretResult.status !== 'found') {
+          logger.error(
+            `Invite secret unavailable for private invite ${inviteId}: ${secretResult.status}`
+          );
+          return JSON.stringify({
+            success: false,
+            error: secretResult.status === 'error'
+              ? 'Invite credential temporarily unavailable'
+              : 'Invite credential missing',
+          });
+        }
+        acceptPassword = secretResult.password;
+      } else if (secretResult.status === 'found') {
+        acceptPassword = secretResult.password;
+      }
+    }
 
     // Update invite status
     const newStatus = accept ? InviteStatus.ACCEPTED : InviteStatus.DECLINED;
@@ -1103,6 +1126,11 @@ function writeInvites(
   const recentInvites: GameInvite[] = invites.slice(-50).map((invite) =>
     stripInvitePassword(invite) as GameInvite
   );
+
+  // Reclaim server-only credentials for metadata that is no longer retained
+  reclaimSecretsForRemovedInvites(nk, invites, recentInvites);
+  // Reclaim credentials for pending invites that expired without a later RPC
+  reclaimExpiredInviteSecrets(nk, recentInvites);
 
   nk.storageWrite([{
     collection: INVITE_CONFIG.STORAGE_COLLECTION,

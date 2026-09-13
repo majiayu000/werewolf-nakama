@@ -33,6 +33,24 @@ export interface InviteWithOptionalPassword {
   [key: string]: unknown;
 }
 
+/** Invite metadata fields needed to reclaim orphaned secrets. */
+export interface InviteSecretReclaimTarget {
+  inviteId: string;
+  receiverId: string;
+  status?: string;
+  expiresAt?: number;
+}
+
+export type InviteSecretReadResult =
+  | { status: 'found'; password: string }
+  | { status: 'missing' }
+  | { status: 'error'; error: unknown };
+
+interface InviteSecretValue {
+  password?: string;
+  expiresAt?: number;
+}
+
 /**
  * Strip password from an invite object before writing client-readable storage.
  */
@@ -51,30 +69,36 @@ export function writeInviteSecret(
   nk: nkruntime.Nakama,
   inviteId: string,
   ownerUserId: string,
-  password: string | null | undefined
+  password: string | null | undefined,
+  expiresAt?: number
 ): void {
   if (!password) {
     return;
+  }
+
+  const value: InviteSecretValue = { password };
+  if (typeof expiresAt === 'number') {
+    value.expiresAt = expiresAt;
   }
 
   nk.storageWrite([{
     collection: INVITE_SECRET_COLLECTION,
     key: inviteId,
     userId: ownerUserId,
-    value: { password },
+    value,
     permissionRead: 0, // Server only — clients cannot read via storage API
     permissionWrite: 0,
   }]);
 }
 
 /**
- * Read invite password from server-only storage.
+ * Read invite password from server-only storage with explicit missing/error status.
  */
-export function readInviteSecret(
+export function readInviteSecretResult(
   nk: nkruntime.Nakama,
   inviteId: string,
   ownerUserId: string
-): string | undefined {
+): InviteSecretReadResult {
   try {
     const objects = nk.storageRead([{
       collection: INVITE_SECRET_COLLECTION,
@@ -82,13 +106,28 @@ export function readInviteSecret(
       userId: ownerUserId,
     }]);
     if (objects.length > 0 && objects[0].value) {
-      const value = objects[0].value as { password?: string };
-      return value.password;
+      const value = objects[0].value as InviteSecretValue;
+      if (typeof value.password === 'string' && value.password.length > 0) {
+        return { status: 'found', password: value.password };
+      }
     }
-  } catch {
-    // Missing secret is treated as no password
+    return { status: 'missing' };
+  } catch (error) {
+    return { status: 'error', error };
   }
-  return undefined;
+}
+
+/**
+ * Read invite password from server-only storage.
+ * Prefer readInviteSecretResult when missing secrets must not be treated as public rooms.
+ */
+export function readInviteSecret(
+  nk: nkruntime.Nakama,
+  inviteId: string,
+  ownerUserId: string
+): string | undefined {
+  const result = readInviteSecretResult(nk, inviteId, ownerUserId);
+  return result.status === 'found' ? result.password : undefined;
 }
 
 /**
@@ -108,6 +147,54 @@ export function deleteInviteSecret(
   } catch {
     // Ignore delete failures for missing keys
   }
+}
+
+/**
+ * Delete secrets for invites removed from metadata (e.g. last-50 eviction).
+ */
+export function reclaimSecretsForRemovedInvites(
+  nk: nkruntime.Nakama,
+  previousInvites: InviteSecretReclaimTarget[],
+  retainedInvites: InviteSecretReclaimTarget[]
+): string[] {
+  const retainedIds = new Set(retainedInvites.map((invite) => invite.inviteId));
+  const reclaimed: string[] = [];
+
+  for (const invite of previousInvites) {
+    if (retainedIds.has(invite.inviteId)) {
+      continue;
+    }
+    deleteInviteSecret(nk, invite.inviteId, invite.receiverId);
+    reclaimed.push(invite.inviteId);
+  }
+
+  return reclaimed;
+}
+
+/**
+ * Delete secrets for pending invites whose expiresAt has passed.
+ * Mutates invite.status to 'expired' when a terminal reclaim occurs.
+ */
+export function reclaimExpiredInviteSecrets(
+  nk: nkruntime.Nakama,
+  invites: InviteSecretReclaimTarget[],
+  now: number = Date.now()
+): string[] {
+  const reclaimed: string[] = [];
+
+  for (const invite of invites) {
+    if (invite.status !== 'pending') {
+      continue;
+    }
+    if (typeof invite.expiresAt !== 'number' || invite.expiresAt >= now) {
+      continue;
+    }
+    invite.status = 'expired';
+    deleteInviteSecret(nk, invite.inviteId, invite.receiverId);
+    reclaimed.push(invite.inviteId);
+  }
+
+  return reclaimed;
 }
 
 /**

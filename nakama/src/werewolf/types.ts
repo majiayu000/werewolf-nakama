@@ -925,6 +925,7 @@ export interface GameInvite {
   maxPlayers: number;         // 房间最大人数
   createdAt: number;          // 创建时间戳
   expiresAt: number;          // 过期时间戳
+  requiresPassword?: boolean; // True when a server-only join credential was stored for this invite
   password?: string;          // Deprecated on stored invites — join password lives in server-only secrets
 }
 

@@ -11,7 +11,10 @@ import {
   stripInvitePassword,
   writeInviteSecret,
   readInviteSecret,
+  readInviteSecretResult,
   deleteInviteSecret,
+  reclaimSecretsForRemovedInvites,
+  reclaimExpiredInviteSecrets,
 } from '../werewolf/invite-password';
 
 function createState(password: string | null, playerIds: string[]) {
@@ -151,13 +154,13 @@ describe('invite secret storage', () => {
 
   it('writes secrets with permissionRead 0 so clients cannot read them', () => {
     const { nk, store } = createMockNk();
-    writeInviteSecret(nk, 'inv_abc', 'receiver-1', 'room-secret');
+    writeInviteSecret(nk, 'inv_abc', 'receiver-1', 'room-secret', 1_700_000_000_000);
 
     const entry = store.get(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_abc`);
     expect(entry).toBeDefined();
     expect(entry!.permissionRead).toBe(0);
     expect(entry!.permissionWrite).toBe(0);
-    expect(entry!.value).toEqual({ password: 'room-secret' });
+    expect(entry!.value).toEqual({ password: 'room-secret', expiresAt: 1_700_000_000_000 });
   });
 
   it('skips writing secrets for public rooms', () => {
@@ -172,8 +175,72 @@ describe('invite secret storage', () => {
     const { nk } = createMockNk();
     writeInviteSecret(nk, 'inv_xyz', 'receiver-2', 'join-me');
     expect(readInviteSecret(nk, 'inv_xyz', 'receiver-2')).toBe('join-me');
+    expect(readInviteSecretResult(nk, 'inv_xyz', 'receiver-2')).toEqual({
+      status: 'found',
+      password: 'join-me',
+    });
 
     deleteInviteSecret(nk, 'inv_xyz', 'receiver-2');
     expect(readInviteSecret(nk, 'inv_xyz', 'receiver-2')).toBeUndefined();
+    expect(readInviteSecretResult(nk, 'inv_xyz', 'receiver-2')).toEqual({ status: 'missing' });
+  });
+
+  it('reports storage read failures distinctly from missing secrets', () => {
+    const nk = {
+      storageRead() {
+        throw new Error('storage unavailable');
+      },
+    } as unknown as nkruntime.Nakama;
+
+    const result = readInviteSecretResult(nk, 'inv_err', 'receiver-1');
+    expect(result.status).toBe('error');
+  });
+
+  it('reclaims secrets when invite metadata is evicted past the retention window', () => {
+    const { nk, store } = createMockNk();
+    const previous = Array.from({ length: 51 }, (_, i) => {
+      const inviteId = `inv_${i}`;
+      writeInviteSecret(nk, inviteId, 'receiver-1', `pass-${i}`, Date.now() + 60_000);
+      return {
+        inviteId,
+        receiverId: 'receiver-1',
+        status: 'pending',
+        expiresAt: Date.now() + 60_000,
+      };
+    });
+    const retained = previous.slice(-50);
+
+    const reclaimed = reclaimSecretsForRemovedInvites(nk, previous, retained);
+    expect(reclaimed).toEqual(['inv_0']);
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_0`)).toBe(false);
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_1`)).toBe(true);
+  });
+
+  it('reclaims secrets for pending invites that expired without a later RPC', () => {
+    const { nk, store } = createMockNk();
+    const now = Date.now();
+    writeInviteSecret(nk, 'inv_old', 'receiver-1', 'stale-pass', now - 1);
+    writeInviteSecret(nk, 'inv_live', 'receiver-1', 'live-pass', now + 60_000);
+
+    const invites = [
+      {
+        inviteId: 'inv_old',
+        receiverId: 'receiver-1',
+        status: 'pending',
+        expiresAt: now - 1,
+      },
+      {
+        inviteId: 'inv_live',
+        receiverId: 'receiver-1',
+        status: 'pending',
+        expiresAt: now + 60_000,
+      },
+    ];
+
+    const reclaimed = reclaimExpiredInviteSecrets(nk, invites, now);
+    expect(reclaimed).toEqual(['inv_old']);
+    expect(invites[0].status).toBe('expired');
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_old`)).toBe(false);
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_live`)).toBe(true);
   });
 });
