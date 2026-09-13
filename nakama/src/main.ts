@@ -896,8 +896,29 @@ function rpcRespondInvite(
 
     const invite = invites[inviteIndex];
 
-    // Check if already responded or expired
+    // Idempotent accept retry: keep credential until expiry/cancel/decline so a
+    // lost RPC response or notification failure can still recover the password.
     if (invite.status !== InviteStatus.PENDING) {
+      if (
+        accept === true &&
+        invite.status === InviteStatus.ACCEPTED &&
+        invite.receiverId === ctx.userId
+      ) {
+        const retrySecret = readInviteSecretResult(nk, inviteId, invite.receiverId);
+        if (invite.requiresPassword && retrySecret.status !== 'found') {
+          return JSON.stringify({
+            success: false,
+            error: retrySecret.status === 'error'
+              ? 'Invite credential temporarily unavailable'
+              : 'Invite credential missing',
+          });
+        }
+        return JSON.stringify({
+          success: true,
+          matchId: invite.matchId,
+          password: retrySecret.status === 'found' ? retrySecret.password : undefined,
+        });
+      }
       return JSON.stringify({
         success: false,
         error: `Invite is already ${invite.status}`,
@@ -951,10 +972,13 @@ function rpcRespondInvite(
       writeInvites(nk, invite.senderId, 'sent', senderInvites);
     }
 
-    // Always drop the server-only credential after a terminal response
-    deleteInviteSecret(nk, inviteId, invite.receiverId);
+    // Decline permanently consumes the credential. Accept keeps it for idempotent
+    // retry until expiry sweep / cancel / receiver-list eviction.
+    if (!accept) {
+      deleteInviteSecret(nk, inviteId, invite.receiverId);
+    }
 
-    // Notify sender about the response
+    // Notify sender about the response (non-fatal: accept must still return password)
     const notificationCode = accept ? 82 : 83; // INVITE_ACCEPTED or INVITE_DECLINED
     const notifications: nkruntime.NotificationRequest[] = [{
       userId: invite.senderId,
@@ -969,7 +993,11 @@ function rpcRespondInvite(
       code: notificationCode,
       persistent: true,
     }];
-    nk.notificationsSend(notifications);
+    try {
+      nk.notificationsSend(notifications);
+    } catch (notifyError) {
+      logger.warn(`Failed to notify sender about invite ${inviteId}: ${notifyError}`);
+    }
 
     logger.info(`User ${ctx.userId} ${accept ? 'accepted' : 'declined'} invite ${inviteId}`);
 
@@ -1127,9 +1155,12 @@ function writeInvites(
     stripInvitePassword(invite) as GameInvite
   );
 
-  // Reclaim server-only credentials for metadata that is no longer retained
-  reclaimSecretsForRemovedInvites(nk, invites, recentInvites);
-  // Reclaim credentials for pending invites that expired without a later RPC
+  // Reclaim secrets only when the receiver's copy is evicted. Sender-list
+  // eviction must not delete credentials still needed by a pending receiver invite.
+  if (type === 'received') {
+    reclaimSecretsForRemovedInvites(nk, invites, recentInvites);
+  }
+  // Opportunistic expiry reclaim on writes; independent sweep also runs in matchLoop
   reclaimExpiredInviteSecrets(nk, recentInvites);
 
   nk.storageWrite([{

@@ -38,7 +38,7 @@ import {
 } from './anti-cheat';
 import { logger as gameLogger, LogCategory, startTimer } from './logger';
 import { metrics, MetricNames, createMatchMetrics, MatchMetrics } from './metrics';
-import { handleInvitePasswordSignal } from './invite-password';
+import { handleInvitePasswordSignal, maybeSweepExpiredInviteSecrets } from './invite-password';
 import { createGameEventLogger, GameEventLogger, GameEventType } from './game-events';
 import {
   ReplayBuffer, ReplayPlayer, ReplayConfig, saveReplay, createReplayBuffer
@@ -1179,6 +1179,9 @@ matchLoop = function matchLoop(
     if (now >= gameState.phaseEndTime && gameState.phase !== GamePhase.WAITING) {
       transitionPhase(gameState, dispatcher, logger);
     }
+
+    // Independent invite-secret expiry sweep (throttled globally across matches)
+    maybeSweepExpiredInviteSecrets(nk, now);
 
     // Check win condition (skip during death skill phase - will be checked after)
     if (gameState.phase !== GamePhase.WAITING &&

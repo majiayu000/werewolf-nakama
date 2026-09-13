@@ -15,6 +15,9 @@ import {
   deleteInviteSecret,
   reclaimSecretsForRemovedInvites,
   reclaimExpiredInviteSecrets,
+  sweepExpiredInviteSecretsFromStorage,
+  maybeSweepExpiredInviteSecrets,
+  resetInviteSecretSweepClockForTests,
 } from '../werewolf/invite-password';
 
 function createState(password: string | null, playerIds: string[]) {
@@ -26,7 +29,14 @@ function createState(password: string | null, playerIds: string[]) {
 }
 
 function createMockNk() {
-  const store = new Map<string, { permissionRead: number; permissionWrite: number; value: unknown }>();
+  const store = new Map<string, {
+    collection: string;
+    key: string;
+    userId: string;
+    permissionRead: number;
+    permissionWrite: number;
+    value: unknown;
+  }>();
   const keyOf = (collection: string, key: string, userId: string) =>
     `${collection}:${userId}:${key}`;
 
@@ -43,6 +53,9 @@ function createMockNk() {
       }>) {
         for (const write of writes) {
           store.set(keyOf(write.collection, write.key, write.userId), {
+            collection: write.collection,
+            key: write.key,
+            userId: write.userId,
             permissionRead: write.permissionRead ?? 1,
             permissionWrite: write.permissionWrite ?? 0,
             value: write.value,
@@ -71,6 +84,24 @@ function createMockNk() {
         for (const del of deletes) {
           store.delete(keyOf(del.collection, del.key, del.userId));
         }
+      },
+      storageList(userId: string | undefined, collection: string, limit?: number) {
+        const objects = Array.from(store.values())
+          .filter((entry) => entry.collection === collection)
+          .filter((entry) => !userId || entry.userId === userId)
+          .slice(0, limit ?? 100)
+          .map((entry) => ({
+            collection: entry.collection,
+            key: entry.key,
+            userId: entry.userId,
+            value: entry.value,
+            permissionRead: entry.permissionRead,
+            permissionWrite: entry.permissionWrite,
+            version: '1',
+            createTime: 0,
+            updateTime: 0,
+          }));
+        return { objects };
       },
     } as unknown as nkruntime.Nakama,
   };
@@ -196,7 +227,7 @@ describe('invite secret storage', () => {
     expect(result.status).toBe('error');
   });
 
-  it('reclaims secrets when invite metadata is evicted past the retention window', () => {
+  it('reclaims secrets when receiver invite metadata is evicted past the retention window', () => {
     const { nk, store } = createMockNk();
     const previous = Array.from({ length: 51 }, (_, i) => {
       const inviteId = `inv_${i}`;
@@ -242,5 +273,30 @@ describe('invite secret storage', () => {
     expect(invites[0].status).toBe('expired');
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_old`)).toBe(false);
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_live`)).toBe(true);
+  });
+
+  it('sweeps expired secrets from storage without requiring invite RPC writes', () => {
+    const { nk, store } = createMockNk();
+    const now = Date.now();
+    writeInviteSecret(nk, 'inv_stale', 'receiver-9', 'gone', now - 5_000);
+    writeInviteSecret(nk, 'inv_fresh', 'receiver-9', 'keep', now + 60_000);
+
+    const reclaimed = sweepExpiredInviteSecretsFromStorage(nk, now);
+    expect(reclaimed).toEqual(['inv_stale']);
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-9:inv_stale`)).toBe(false);
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-9:inv_fresh`)).toBe(true);
+  });
+
+  it('throttles collection-wide secret sweeps across callers', () => {
+    resetInviteSecretSweepClockForTests();
+    const { nk, store } = createMockNk();
+    const now = 1_700_000_000_000;
+    writeInviteSecret(nk, 'inv_a', 'receiver-1', 'a', now - 1);
+
+    expect(maybeSweepExpiredInviteSecrets(nk, now, 60_000)).toEqual(['inv_a']);
+    writeInviteSecret(nk, 'inv_b', 'receiver-1', 'b', now - 1);
+    expect(maybeSweepExpiredInviteSecrets(nk, now + 1_000, 60_000)).toBeNull();
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_b`)).toBe(true);
+    expect(maybeSweepExpiredInviteSecrets(nk, now + 60_000, 60_000)).toEqual(['inv_b']);
   });
 });

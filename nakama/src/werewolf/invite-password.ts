@@ -150,7 +150,11 @@ export function deleteInviteSecret(
 }
 
 /**
- * Delete secrets for invites removed from metadata (e.g. last-50 eviction).
+ * Delete secrets for invites removed from the receiver's metadata list
+ * (e.g. last-50 eviction of received invites).
+ *
+ * Do NOT call this for the sender's sent-invite list: sender-list eviction
+ * must not delete receiver-owned secrets while the receiver copy is still pending.
  */
 export function reclaimSecretsForRemovedInvites(
   nk: nkruntime.Nakama,
@@ -195,6 +199,86 @@ export function reclaimExpiredInviteSecrets(
   }
 
   return reclaimed;
+}
+
+/** Minimum interval between collection-wide invite-secret expiry sweeps. */
+export const INVITE_SECRET_SWEEP_INTERVAL_MS = 60_000;
+
+let lastInviteSecretSweepAt = 0;
+
+/**
+ * Normalize nk.storageList return shapes used across this codebase
+ * (array vs { objects, cursor }).
+ */
+function listStorageObjects(
+  listed: nkruntime.StorageObjectList | nkruntime.StorageObject[] | null | undefined
+): nkruntime.StorageObject[] {
+  if (!listed) {
+    return [];
+  }
+  if (Array.isArray(listed)) {
+    return listed;
+  }
+  return listed.objects || [];
+}
+
+/**
+ * Background sweep: delete expired invite secrets directly from server-only
+ * storage, independent of later invite RPC writes.
+ */
+export function sweepExpiredInviteSecretsFromStorage(
+  nk: nkruntime.Nakama,
+  now: number = Date.now(),
+  limit: number = 100
+): string[] {
+  const reclaimed: string[] = [];
+
+  try {
+    // undefined userId lists the collection across owners (server runtime).
+    const listed = nk.storageList(
+      undefined as unknown as string,
+      INVITE_SECRET_COLLECTION,
+      limit,
+      undefined
+    );
+    const objects = listStorageObjects(
+      listed as nkruntime.StorageObjectList | nkruntime.StorageObject[]
+    );
+
+    for (const obj of objects) {
+      const value = (obj.value || {}) as InviteSecretValue;
+      if (typeof value.expiresAt !== 'number' || value.expiresAt >= now) {
+        continue;
+      }
+      deleteInviteSecret(nk, obj.key, obj.userId);
+      reclaimed.push(obj.key);
+    }
+  } catch {
+    // Sweep is best-effort; invite RPCs still reclaim opportunistically.
+  }
+
+  return reclaimed;
+}
+
+/**
+ * Throttled collection sweep suitable for matchLoop / periodic callers.
+ * Returns reclaimed invite IDs, or null when the interval has not elapsed.
+ */
+export function maybeSweepExpiredInviteSecrets(
+  nk: nkruntime.Nakama,
+  now: number = Date.now(),
+  intervalMs: number = INVITE_SECRET_SWEEP_INTERVAL_MS
+): string[] | null {
+  if (now - lastInviteSecretSweepAt < intervalMs) {
+    return null;
+  }
+  lastInviteSecretSweepAt = now;
+  return sweepExpiredInviteSecretsFromStorage(nk, now);
+}
+
+/** Test helper: reset sweep throttle state. */
+export function resetInviteSecretSweepClockForTests(): void {
+  lastInviteSecretSweepAt = 0;
 }
 
 /**
