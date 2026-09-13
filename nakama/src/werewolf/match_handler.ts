@@ -42,6 +42,7 @@ import { createGameEventLogger, GameEventLogger, GameEventType } from './game-ev
 import {
   ReplayBuffer, ReplayPlayer, ReplayConfig, saveReplay, createReplayBuffer
 } from './replay';
+import { evaluateMatchJoinAttempt } from './match_join';
 
 // Match-specific loggers and metrics storage
 const matchLoggers = new Map<string, GameEventLogger>();
@@ -889,61 +890,37 @@ matchJoinAttempt = function matchJoinAttempt(
 ): { state: nkruntime.MatchState; accept: boolean; rejectMessage?: string } {
     const gameState = state as unknown as GameState;
     const isSpectator = metadata?.spectator === true;
+    const result = evaluateMatchJoinAttempt(gameState, presence.userId, metadata);
 
-    // Check if game already started
+    if (!result.accept) {
+      if (result.rejectMessage === '密码错误') {
+        logger.info(`Rejecting ${presence.username} - incorrect password`);
+      } else if (result.rejectMessage === 'Room is full') {
+        logger.info(`Rejecting ${presence.username} - room full`);
+      } else if (result.rejectMessage === 'Game already in progress') {
+        logger.info(`Rejecting ${presence.username} - game already in progress`);
+      } else {
+        logger.info(`Rejecting ${presence.username}`);
+      }
+      return { state, accept: false, rejectMessage: result.rejectMessage };
+    }
+
     if (gameState.phase !== GamePhase.WAITING) {
-      // Allow reconnection for existing players
       if (gameState.players.has(presence.userId)) {
         logger.info(`Player ${presence.username} reconnecting`);
-        return { state, accept: true };
-      }
-
-      // Allow reconnection for existing spectators
-      if (gameState.spectators.has(presence.userId)) {
+      } else if (gameState.spectators.has(presence.userId)) {
         logger.info(`Spectator ${presence.username} reconnecting`);
-        return { state, accept: true };
-      }
-
-      // Allow spectators to join during game
-      if (isSpectator) {
+      } else if (isSpectator) {
         logger.info(`Accepting ${presence.username} as spectator`);
-        return { state, accept: true };
       }
-
-      logger.info(`Rejecting ${presence.username} - game already in progress`);
-      return {
-        state,
-        accept: false,
-        rejectMessage: 'Game already in progress',
-      };
-    }
-
-    // Check password for private rooms
-    if (gameState.password !== null) {
-      const providedPassword = metadata?.password;
-      if (!providedPassword || providedPassword !== gameState.password) {
-        logger.info(`Rejecting ${presence.username} - incorrect password`);
-        return {
-          state,
-          accept: false,
-          rejectMessage: '密码错误',
-        };
+    } else {
+      if (gameState.password !== null) {
+        logger.info(`Password verified for ${presence.username}`);
       }
-      logger.info(`Password verified for ${presence.username}`);
+      logger.info(`Accepting ${presence.username} to join${isSpectator ? ' as spectator' : ''}`);
     }
 
-    // Check player limit (spectators don't count)
-    if (!isSpectator && gameState.players.size >= gameState.config.maxPlayers) {
-      logger.info(`Rejecting ${presence.username} - room full`);
-      return {
-        state,
-        accept: false,
-        rejectMessage: 'Room is full',
-      };
-    }
-
-  logger.info(`Accepting ${presence.username} to join${isSpectator ? ' as spectator' : ''}`);
-  return { state, accept: true };
+    return { state, accept: true };
 }
 
 /**
