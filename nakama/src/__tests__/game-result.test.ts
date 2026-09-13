@@ -267,6 +267,60 @@ describe('applyGameResultStats', () => {
     expect(achievements.achievements[AchievementId.SEER_CORRECT_10]?.current).toBe(2);
   });
 
+  test('adds multiple guard saves toward GUARD_SAVE_10', () => {
+    const userId = 'guard-multi-save';
+
+    applyGameResultStats(nk, logger as any, {
+      players: [{
+        userId,
+        role: Role.GUARD,
+        faction: Faction.VILLAGER,
+        isWinner: true,
+        isAlive: true,
+        guardSaves: 3,
+      }],
+      winner: Faction.VILLAGER,
+    });
+
+    const achievements = readAchievements(nk, userId);
+    expect(achievements.achievements[AchievementId.GUARD_SAVE_10]?.current).toBe(3);
+  });
+
+  test('requires survival for LAST_STAND and COMEBACK_KING', () => {
+    const deadTeammate = 'dead-villager';
+    const soleSurvivor = 'alive-villager';
+
+    applyGameResultStats(nk, logger as any, {
+      players: [
+        {
+          userId: deadTeammate,
+          role: Role.VILLAGER,
+          faction: Faction.VILLAGER,
+          isWinner: true,
+          isAlive: false,
+          playerFactionSize: 1,
+        },
+        {
+          userId: soleSurvivor,
+          role: Role.VILLAGER,
+          faction: Faction.VILLAGER,
+          isWinner: true,
+          isAlive: true,
+          playerFactionSize: 1,
+        },
+      ],
+      winner: Faction.VILLAGER,
+    });
+
+    const deadAchievements = readAchievements(nk, deadTeammate);
+    expect(deadAchievements.achievements[AchievementId.LAST_STAND]?.completed).toBeFalsy();
+    expect(deadAchievements.achievements[AchievementId.COMEBACK_KING]?.completed).toBeFalsy();
+
+    const aliveAchievements = readAchievements(nk, soleSurvivor);
+    expect(aliveAchievements.achievements[AchievementId.LAST_STAND]?.completed).toBe(true);
+    expect(aliveAchievements.achievements[AchievementId.COMEBACK_KING]?.completed).toBe(true);
+  });
+
   test('skips achievements when evaluateAchievements is false', () => {
     const userId = 'stats-only';
 

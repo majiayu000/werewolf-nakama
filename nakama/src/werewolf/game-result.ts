@@ -39,6 +39,9 @@ export interface GameResultPlayer {
   seerCheckedWolves?: number;
   witchSaved?: boolean;
   witchPoisonedWolf?: boolean;
+  /** Successful guard saves this game (preferred) */
+  guardSaves?: number;
+  /** Legacy boolean alias — treated as 1 save when guardSaves is omitted */
   guardSaved?: boolean;
   hunterKilledWolf?: boolean;
   idiotRevealed?: boolean;
@@ -270,6 +273,9 @@ export interface EvaluateAchievementsInput {
   seerCheckedWolves?: number;
   witchSaved?: boolean;
   witchPoisonedWolf?: boolean;
+  /** Successful guard saves this game (preferred) */
+  guardSaves?: number;
+  /** Legacy boolean alias — treated as 1 save when guardSaves is omitted */
   guardSaved?: boolean;
   hunterKilledWolf?: boolean;
   idiotRevealed?: boolean;
@@ -312,6 +318,7 @@ export function evaluateAchievements(
     seerCheckedWolves = 0,
     witchSaved = false,
     witchPoisonedWolf = false,
+    guardSaves,
     guardSaved = false,
     hunterKilledWolf = false,
     idiotRevealed = false,
@@ -319,6 +326,10 @@ export function evaluateAchievements(
     votedOutWolves = 0,
     wasExposed,
   } = input;
+
+  const resolvedGuardSaves = typeof guardSaves === 'number'
+    ? guardSaves
+    : (guardSaved ? 1 : 0);
 
   const userAchievements = readAchievements(nk, userId);
   const newUnlocks: AchievementUnlock[] = [];
@@ -449,8 +460,9 @@ export function evaluateAchievements(
   if (role === Role.WITCH && witchPoisonedWolf) {
     incrementAndCheck(AchievementId.WITCH_POISON_WOLF_10);
   }
-  if (role === Role.GUARD && guardSaved) {
-    incrementAndCheck(AchievementId.GUARD_SAVE_10);
+  if (role === Role.GUARD && resolvedGuardSaves > 0) {
+    const currentProgress = userAchievements.achievements[AchievementId.GUARD_SAVE_10]?.current || 0;
+    checkAndUnlock(AchievementId.GUARD_SAVE_10, currentProgress + resolvedGuardSaves);
   }
   if ((role === Role.HUNTER || role === Role.ALPHA_WOLF) && hunterKilledWolf) {
     incrementAndCheck(AchievementId.HUNTER_KILL_WOLF_10);
@@ -481,10 +493,11 @@ export function evaluateAchievements(
   if (won && role && isWerewolf(role as Role) && wasExposed === false) {
     incrementAndCheck(AchievementId.SILENT_KILLER);
   }
-  if (won && role && !isWerewolf(role as Role) && playerFactionSize === 1) {
+  // Only the living sole survivor qualifies for last-stand / comeback
+  if (won && survived && role && !isWerewolf(role as Role) && playerFactionSize === 1) {
     incrementAndCheck(AchievementId.LAST_STAND);
   }
-  if (won && playerFactionSize === 1) {
+  if (won && survived && playerFactionSize === 1) {
     incrementAndCheck(AchievementId.COMEBACK_KING);
   }
 
@@ -614,6 +627,7 @@ export function applyGameResultStats(
         seerCheckedWolves: player.seerCheckedWolves ?? 0,
         witchSaved: player.witchSaved ?? false,
         witchPoisonedWolf: player.witchPoisonedWolf ?? false,
+        guardSaves: player.guardSaves,
         guardSaved: player.guardSaved ?? false,
         hunterKilledWolf: player.hunterKilledWolf ?? false,
         idiotRevealed: player.idiotRevealed ?? false,

@@ -372,7 +372,8 @@ export interface PlayerExtendedState {
   seerCheckedWolves: number;
   witchSaved: boolean;
   witchPoisonedWolf: boolean;
-  guardSaved: boolean;
+  /** Successful guard protections against wolf kills this match */
+  guardSaves: number;
   hunterKilledWolf: boolean;
   /** True once a seer has checked this werewolf */
   wasExposed: boolean;

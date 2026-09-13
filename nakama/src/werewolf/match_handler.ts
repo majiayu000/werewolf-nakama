@@ -817,7 +817,7 @@ function assignRoles(state: GameState, logger: nkruntime.Logger): void {
       seerCheckedWolves: 0,
       witchSaved: false,
       witchPoisonedWolf: false,
-      guardSaved: false,
+      guardSaves: 0,
       hunterKilledWolf: false,
       wasExposed: false,
       votedOutWolves: 0,
@@ -1573,6 +1573,14 @@ function handleUseSkill(
 
     case Role.SEER:
       if (state.nightSubPhase === NightSubPhase.SEER && targetId) {
+        // One accepted check per seer per night — ignore duplicate USE_SKILL spam
+        const alreadyChecked = state.nightActions.some(
+          a => a.role === Role.SEER && a.playerId === player.oderId
+        );
+        if (alreadyChecked) {
+          break;
+        }
+
         state.seerTarget = targetId;
         state.nightActions.push(action);
 
@@ -2045,11 +2053,13 @@ function processNightResults(
       // Check if protected by guard
       if (targetExt?.isProtected) {
         logger.info(`${target.displayName} was protected by guard`);
-        // Successful guard save against wolf kill
-        for (const [pid, p] of state.players) {
-          if (p.role === Role.GUARD && !p.isSpectator) {
-            const guardExt = state.extendedStates.get(pid);
-            if (guardExt) guardExt.guardSaved = true;
+        // Credit only the guard(s) who actually protected this wolf target
+        for (const nightAction of state.nightActions) {
+          if (nightAction.role === Role.GUARD && nightAction.targetId === state.wolfTarget) {
+            const guardExt = state.extendedStates.get(nightAction.playerId);
+            if (guardExt) {
+              guardExt.guardSaves = (guardExt.guardSaves || 0) + 1;
+            }
           }
         }
       }
@@ -2057,11 +2067,13 @@ function processNightResults(
       else if (state.witchSaveTarget === state.wolfTarget) {
         savedByWitch = true;
         logger.info(`${target.displayName} was saved by witch`);
-        for (const [pid, p] of state.players) {
-          if (p.role === Role.WITCH && !p.isSpectator) {
-            const witchExt = state.extendedStates.get(pid);
-            if (witchExt) witchExt.witchSaved = true;
-          }
+        // Credit only the witch who used the antidote
+        const saveAction = state.nightActions.find(
+          a => a.role === Role.WITCH && a.action === 'heal'
+        );
+        if (saveAction) {
+          const witchExt = state.extendedStates.get(saveAction.playerId);
+          if (witchExt) witchExt.witchSaved = true;
         }
       }
       // Kill the target
@@ -2090,11 +2102,13 @@ function processNightResults(
       logger.info(`${target.displayName} was poisoned by witch`);
 
       if (target.role && isWerewolf(target.role)) {
-        for (const [pid, p] of state.players) {
-          if (p.role === Role.WITCH && !p.isSpectator) {
-            const witchExt = state.extendedStates.get(pid);
-            if (witchExt) witchExt.witchPoisonedWolf = true;
-          }
+        // Credit only the witch who used the poison
+        const poisonAction = state.nightActions.find(
+          a => a.role === Role.WITCH && a.action === 'poison'
+        );
+        if (poisonAction) {
+          const witchExt = state.extendedStates.get(poisonAction.playerId);
+          if (witchExt) witchExt.witchPoisonedWolf = true;
         }
       }
     }
@@ -2518,7 +2532,7 @@ function recordGameStats(
           seerCheckedWolves: extState?.seerCheckedWolves || 0,
           witchSaved: !!extState?.witchSaved,
           witchPoisonedWolf: !!extState?.witchPoisonedWolf,
-          guardSaved: !!extState?.guardSaved,
+          guardSaves: extState?.guardSaves || 0,
           hunterKilledWolf: !!extState?.hunterKilledWolf,
           idiotRevealed: !!extState?.idiotRevealed,
           // Explicit boolean — unknown/omitted must not award SILENT_KILLER
