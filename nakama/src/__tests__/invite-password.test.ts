@@ -85,23 +85,30 @@ function createMockNk() {
           store.delete(keyOf(del.collection, del.key, del.userId));
         }
       },
-      storageList(userId: string | undefined, collection: string, limit?: number) {
-        const objects = Array.from(store.values())
+      storageList(userId: string | undefined, collection: string, limit?: number, cursor?: string) {
+        const pageSize = limit ?? 100;
+        const all = Array.from(store.values())
           .filter((entry) => entry.collection === collection)
           .filter((entry) => !userId || entry.userId === userId)
-          .slice(0, limit ?? 100)
-          .map((entry) => ({
-            collection: entry.collection,
-            key: entry.key,
-            userId: entry.userId,
-            value: entry.value,
-            permissionRead: entry.permissionRead,
-            permissionWrite: entry.permissionWrite,
-            version: '1',
-            createTime: 0,
-            updateTime: 0,
-          }));
-        return { objects };
+          .sort((a, b) => a.key.localeCompare(b.key));
+        const start = cursor ? Number.parseInt(cursor, 10) || 0 : 0;
+        const slice = all.slice(start, start + pageSize);
+        const next = start + pageSize;
+        const objects = slice.map((entry) => ({
+          collection: entry.collection,
+          key: entry.key,
+          userId: entry.userId,
+          value: entry.value,
+          permissionRead: entry.permissionRead,
+          permissionWrite: entry.permissionWrite,
+          version: '1',
+          createTime: 0,
+          updateTime: 0,
+        }));
+        return {
+          objects,
+          cursor: next < all.length ? String(next) : undefined,
+        };
       },
     } as unknown as nkruntime.Nakama,
   };
@@ -285,6 +292,22 @@ describe('invite secret storage', () => {
     expect(reclaimed).toEqual(['inv_stale']);
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-9:inv_stale`)).toBe(false);
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-9:inv_fresh`)).toBe(true);
+  });
+
+  it('pages through the entire invite-secret collection during expiry sweeps', () => {
+    const { nk, store } = createMockNk();
+    const now = Date.now();
+    for (let i = 0; i < 25; i++) {
+      const inviteId = `inv_page_${String(i).padStart(2, '0')}`;
+      writeInviteSecret(nk, inviteId, 'receiver-page', `pass-${i}`, now - 1);
+    }
+    writeInviteSecret(nk, 'inv_page_live', 'receiver-page', 'keep', now + 60_000);
+
+    const reclaimed = sweepExpiredInviteSecretsFromStorage(nk, now, 10);
+    expect(reclaimed).toHaveLength(25);
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-page:inv_page_live`)).toBe(true);
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-page:inv_page_00`)).toBe(false);
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-page:inv_page_24`)).toBe(false);
   });
 
   it('throttles collection-wide secret sweeps across callers', () => {

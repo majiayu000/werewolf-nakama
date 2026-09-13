@@ -210,21 +210,28 @@ let lastInviteSecretSweepAt = 0;
  * Normalize nk.storageList return shapes used across this codebase
  * (array vs { objects, cursor }).
  */
-function listStorageObjects(
+function listStoragePage(
   listed: nkruntime.StorageObjectList | nkruntime.StorageObject[] | null | undefined
-): nkruntime.StorageObject[] {
+): { objects: nkruntime.StorageObject[]; cursor?: string } {
   if (!listed) {
-    return [];
+    return { objects: [] };
   }
   if (Array.isArray(listed)) {
-    return listed;
+    return { objects: listed };
   }
-  return listed.objects || [];
+  return {
+    objects: listed.objects || [],
+    cursor: listed.cursor || undefined,
+  };
 }
 
 /**
  * Background sweep: delete expired invite secrets directly from server-only
  * storage, independent of later invite RPC writes.
+ *
+ * Pages through the full collection via StorageObjectList.cursor so expiry
+ * cleanup is not limited to the first page (default 100). Collect keys first,
+ * then delete, so mid-sweep deletes cannot skip later pages.
  */
 export function sweepExpiredInviteSecretsFromStorage(
   nk: nkruntime.Nakama,
@@ -232,26 +239,40 @@ export function sweepExpiredInviteSecretsFromStorage(
   limit: number = 100
 ): string[] {
   const reclaimed: string[] = [];
+  const toDelete: Array<{ key: string; userId: string }> = [];
 
   try {
-    // undefined userId lists the collection across owners (server runtime).
-    const listed = nk.storageList(
-      undefined as unknown as string,
-      INVITE_SECRET_COLLECTION,
-      limit,
-      undefined
-    );
-    const objects = listStorageObjects(
-      listed as nkruntime.StorageObjectList | nkruntime.StorageObject[]
-    );
+    let cursor: string | undefined;
+    do {
+      // undefined userId lists the collection across owners (server runtime).
+      const listed = nk.storageList(
+        undefined as unknown as string,
+        INVITE_SECRET_COLLECTION,
+        limit,
+        cursor
+      );
+      const page = listStoragePage(
+        listed as nkruntime.StorageObjectList | nkruntime.StorageObject[]
+      );
 
-    for (const obj of objects) {
-      const value = (obj.value || {}) as InviteSecretValue;
-      if (typeof value.expiresAt !== 'number' || value.expiresAt >= now) {
-        continue;
+      for (const obj of page.objects) {
+        const value = (obj.value || {}) as InviteSecretValue;
+        if (typeof value.expiresAt !== 'number' || value.expiresAt >= now) {
+          continue;
+        }
+        toDelete.push({ key: obj.key, userId: obj.userId });
       }
-      deleteInviteSecret(nk, obj.key, obj.userId);
-      reclaimed.push(obj.key);
+
+      cursor = page.cursor;
+      // Stop when the page is empty or Nakama returns no further cursor.
+      if (!cursor || page.objects.length === 0) {
+        break;
+      }
+    } while (true);
+
+    for (const item of toDelete) {
+      deleteInviteSecret(nk, item.key, item.userId);
+      reclaimed.push(item.key);
     }
   } catch {
     // Sweep is best-effort; invite RPCs still reclaim opportunistically.
@@ -261,7 +282,8 @@ export function sweepExpiredInviteSecretsFromStorage(
 }
 
 /**
- * Throttled collection sweep suitable for matchLoop / periodic callers.
+ * Throttled collection sweep suitable for match-independent RPC callers
+ * and opportunistic matchLoop ticks.
  * Returns reclaimed invite IDs, or null when the interval has not elapsed.
  */
 export function maybeSweepExpiredInviteSecrets(

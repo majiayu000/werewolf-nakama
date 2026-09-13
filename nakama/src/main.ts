@@ -36,6 +36,7 @@ import {
   deleteInviteSecret,
   reclaimSecretsForRemovedInvites,
   reclaimExpiredInviteSecrets,
+  maybeSweepExpiredInviteSecrets,
 } from './werewolf/invite-password';
 
 // Storage collection for user stats
@@ -97,6 +98,11 @@ function InitModule(
   // Register matchmaker callback
   initializer.registerMatchmakerMatched(onMatchmakerMatched);
   logger.info('Registered matchmaker callback');
+
+  // Match-independent invite-secret expiry sweep at module load; invite RPCs
+  // and live match loops also call the throttled sweeper so idle servers still
+  // reclaim credentials without requiring an active matchLoop.
+  maybeSweepExpiredInviteSecrets(nk);
 
   logger.info('Werewolf Game Server initialized successfully!');
 }
@@ -650,6 +656,9 @@ function rpcSendInvite(
   nk: nkruntime.Nakama,
   payload: string
 ): string {
+  // Lifecycle-independent secret reclaim (does not require a live matchLoop)
+  maybeSweepExpiredInviteSecrets(nk);
+
   if (!payload) {
     return JSON.stringify({
       success: false,
@@ -812,6 +821,9 @@ function rpcGetInvites(
   nk: nkruntime.Nakama,
   payload: string
 ): string {
+  // Lifecycle-independent secret reclaim (does not require a live matchLoop)
+  maybeSweepExpiredInviteSecrets(nk);
+
   try {
     const data = payload ? JSON.parse(payload) : {};
     const type = data.type || 'received'; // 'sent' or 'received'
@@ -864,6 +876,9 @@ function rpcRespondInvite(
   nk: nkruntime.Nakama,
   payload: string
 ): string {
+  // Lifecycle-independent secret reclaim (does not require a live matchLoop)
+  maybeSweepExpiredInviteSecrets(nk);
+
   if (!payload) {
     return JSON.stringify({
       success: false,
@@ -1030,6 +1045,9 @@ function rpcCancelInvite(
   nk: nkruntime.Nakama,
   payload: string
 ): string {
+  // Lifecycle-independent secret reclaim (does not require a live matchLoop)
+  maybeSweepExpiredInviteSecrets(nk);
+
   if (!payload) {
     return JSON.stringify({
       success: false,
@@ -1069,6 +1087,10 @@ function rpcCancelInvite(
       });
     }
 
+    // Revoke join credential before status writes so a later storage failure
+    // cannot leave a live private-room password after the sender marks cancelled.
+    deleteInviteSecret(nk, inviteId, invite.receiverId);
+
     // Update invite status
     invite.status = InviteStatus.CANCELLED;
     writeInvites(nk, ctx.userId, 'sent', invites);
@@ -1080,9 +1102,6 @@ function rpcCancelInvite(
       receiverInvites[receiverInviteIndex].status = InviteStatus.CANCELLED;
       writeInvites(nk, invite.receiverId, 'received', receiverInvites);
     }
-
-    // Revoke join credential so cancelled invites cannot recover the password
-    deleteInviteSecret(nk, inviteId, invite.receiverId);
 
     // Notify receiver about cancellation
     const notifications: nkruntime.NotificationRequest[] = [{
@@ -1155,14 +1174,13 @@ function writeInvites(
     stripInvitePassword(invite) as GameInvite
   );
 
-  // Reclaim secrets only when the receiver's copy is evicted. Sender-list
-  // eviction must not delete credentials still needed by a pending receiver invite.
-  if (type === 'received') {
-    reclaimSecretsForRemovedInvites(nk, invites, recentInvites);
-  }
-  // Opportunistic expiry reclaim on writes; independent sweep also runs in matchLoop
+  // Opportunistic expiry reclaim on writes; independent sweep also runs from
+  // invite RPCs / InitModule / matchLoop (match-independent paths included).
   reclaimExpiredInviteSecrets(nk, recentInvites);
 
+  // Persist eviction first. Only after the write succeeds reclaim secrets for
+  // invites dropped from the receiver list — delete-before-write would leave a
+  // pending invite without its password if storageWrite fails.
   nk.storageWrite([{
     collection: INVITE_CONFIG.STORAGE_COLLECTION,
     key,
@@ -1171,6 +1189,12 @@ function writeInvites(
     permissionRead: 1, // Owner only — invite metadata; passwords live in INVITE_SECRET_COLLECTION
     permissionWrite: 0, // Server only
   }]);
+
+  // Reclaim secrets only when the receiver's copy is evicted. Sender-list
+  // eviction must not delete credentials still needed by a pending receiver invite.
+  if (type === 'received') {
+    reclaimSecretsForRemovedInvites(nk, invites, recentInvites);
+  }
 }
 
 // ============================================================================

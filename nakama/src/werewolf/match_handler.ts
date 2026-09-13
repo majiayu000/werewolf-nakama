@@ -1180,7 +1180,9 @@ matchLoop = function matchLoop(
       transitionPhase(gameState, dispatcher, logger);
     }
 
-    // Independent invite-secret expiry sweep (throttled globally across matches)
+    // Opportunistic invite-secret expiry sweep while matches are live.
+    // Match-independent callers (InitModule + invite RPCs) also run this
+    // throttled sweeper so idle servers still reclaim expired credentials.
     maybeSweepExpiredInviteSecrets(nk, now);
 
     // Check win condition (skip during death skill phase - will be checked after)
