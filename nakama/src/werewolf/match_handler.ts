@@ -42,7 +42,12 @@ import { createGameEventLogger, GameEventLogger, GameEventType } from './game-ev
 import {
   ReplayBuffer, ReplayPlayer, ReplayConfig, saveReplay, createReplayBuffer
 } from './replay';
-import { applySpectatorLeave, evaluateMatchJoinAttempt } from './match_join';
+import {
+  applySpectatorLeave,
+  countActiveSpectators,
+  evaluateMatchJoinAttempt,
+  listActiveSpectators,
+} from './match_join';
 
 // Match-specific loggers and metrics storage
 const matchLoggers = new Map<string, GameEventLogger>();
@@ -280,8 +285,8 @@ function sendSpectatorFullState(
     };
   });
 
-  // Build spectator list
-  const spectatorList = Array.from(state.spectators.values()).map(s => ({
+  // Build spectator list (connected only; disconnected retain auth but stay hidden)
+  const spectatorList = listActiveSpectators(state.spectators).map(s => ({
     id: s.oderId,
     name: s.displayName,
     joinedAt: s.joinedAt,
@@ -320,10 +325,10 @@ function sendSpectatorFullState(
 }
 
 /**
- * Get all spectator presences
+ * Get connected spectator presences for live broadcasts
  */
 function getSpectatorPresences(state: GameState): nkruntime.Presence[] {
-  return Array.from(state.spectators.values()).map(s => ({
+  return listActiveSpectators(state.spectators).map(s => ({
     userId: s.oderId,
     sessionId: '',
     username: s.odername,
@@ -944,8 +949,19 @@ matchJoin = function matchJoin(
       // Check if reconnecting spectator
       const existingSpectator = gameState.spectators.get(presence.userId);
       if (existingSpectator) {
+        const wasDisconnected =
+          existingSpectator.connection === ConnectionStatus.DISCONNECTED;
         existingSpectator.connection = ConnectionStatus.CONNECTED;
         logger.info(`Spectator ${presence.username} reconnected`);
+
+        if (wasDisconnected) {
+          broadcastMessage(dispatcher, OpCode.SPECTATOR_JOIN, {
+            oderId: presence.userId,
+            odername: presence.username,
+            displayName: presence.username,
+            spectatorCount: countActiveSpectators(gameState.spectators),
+          });
+        }
 
         // Send full game state to spectator
         sendSpectatorFullState(gameState, dispatcher, presence);
@@ -1004,14 +1020,17 @@ matchJoin = function matchJoin(
           };
 
           gameState.spectators.set(presence.userId, spectator);
-          logger.info(`Spectator ${presence.username} joined (${gameState.spectators.size} spectators)`);
+          const activeSpectatorCount = countActiveSpectators(gameState.spectators);
+          logger.info(
+            `Spectator ${presence.username} joined (${activeSpectatorCount} spectators)`
+          );
 
           // Broadcast spectator join to all players and spectators
           broadcastMessage(dispatcher, OpCode.SPECTATOR_JOIN, {
             oderId: presence.userId,
             odername: presence.username,
             displayName: presence.username,
-            spectatorCount: gameState.spectators.size,
+            spectatorCount: activeSpectatorCount,
           });
 
           // Send full game state to spectator (includes all roles!)
@@ -1078,20 +1097,18 @@ matchLeave = function matchLeave(
       // reconnect stays password-free after matchLeave clears the live presence.
       const spectatorLeave = applySpectatorLeave(gameState, presence.userId);
       if (spectatorLeave) {
-        if (spectatorLeave.action === 'removed') {
-          logger.info(
-            `Spectator ${presence.username} left (${spectatorLeave.spectatorCount} spectators remaining)`
-          );
-          broadcastMessage(dispatcher, OpCode.SPECTATOR_LEAVE, {
-            oderId: presence.userId,
-            odername: presence.username,
-            spectatorCount: spectatorLeave.spectatorCount,
-          });
-        } else {
-          logger.info(
-            `Spectator ${presence.username} disconnected during game (${spectatorLeave.spectatorCount} spectators retained)`
-          );
-        }
+        logger.info(
+          spectatorLeave.action === 'removed'
+            ? `Spectator ${presence.username} left (${spectatorLeave.spectatorCount} spectators remaining)`
+            : `Spectator ${presence.username} disconnected during game (${spectatorLeave.spectatorCount} active spectators; auth retained)`
+        );
+        // Emit leave for both lobby removes and mid-game disconnects so clients
+        // drop disconnected spectators from active lists/counts.
+        broadcastMessage(dispatcher, OpCode.SPECTATOR_LEAVE, {
+          oderId: presence.userId,
+          odername: presence.username,
+          spectatorCount: spectatorLeave.spectatorCount,
+        });
         continue;
       }
 
@@ -1206,7 +1223,7 @@ matchTerminate = function matchTerminate(
         phase: gameState.phase,
         dayNumber: gameState.dayNumber,
         playerCount: gameState.players.size,
-        spectatorCount: gameState.spectators.size,
+        spectatorCount: countActiveSpectators(gameState.spectators),
         winner: gameState.winner,
         graceSeconds
       }

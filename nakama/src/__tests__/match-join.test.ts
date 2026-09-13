@@ -11,8 +11,10 @@ import {
 } from './test-utils';
 import {
   applySpectatorLeave,
+  countActiveSpectators,
   evaluateMatchJoinAttempt,
   isPrivateRoomPasswordValid,
+  listActiveSpectators,
   PRIVATE_ROOM_PASSWORD_REJECT,
 } from '../werewolf/match_join';
 import {
@@ -62,7 +64,7 @@ describe('applySpectatorLeave — retain mid-game authorization', () => {
 
     expect(leave).toEqual({
       action: 'disconnected',
-      spectatorCount: 1,
+      spectatorCount: 0,
     });
     expect(state.spectators.has(spectator.oderId)).toBe(true);
     expect(state.spectators.get(spectator.oderId)?.connection).toBe(
@@ -108,6 +110,44 @@ describe('applySpectatorLeave — retain mid-game authorization', () => {
     );
     expect(result.accept).toBe(true);
     expect(result.rejectMessage).toBeUndefined();
+  });
+
+  test('excludes disconnected spectators from active lists and counts', () => {
+    const connected = createSpectator({ oderId: 'spec-online' });
+    const disconnected = createSpectator({
+      oderId: 'spec-offline',
+      connection: ConnectionStatus.DISCONNECTED,
+    });
+    const spectators = new Map([
+      [connected.oderId, connected],
+      [disconnected.oderId, disconnected],
+    ]);
+
+    expect(countActiveSpectators(spectators)).toBe(1);
+    expect(listActiveSpectators(spectators).map((s) => s.oderId)).toEqual([
+      'spec-online',
+    ]);
+  });
+
+  test('mid-game leave reports active count while retaining auth entry', () => {
+    const online = createSpectator({ oderId: 'spec-online' });
+    const leaving = createSpectator({ oderId: 'spec-leaving' });
+    const state = createTestGameState({
+      phase: GamePhase.NIGHT,
+      spectators: new Map([
+        [online.oderId, online],
+        [leaving.oderId, leaving],
+      ]),
+    });
+
+    const leave = applySpectatorLeave(state, leaving.oderId);
+
+    expect(leave).toEqual({
+      action: 'disconnected',
+      spectatorCount: 1,
+    });
+    expect(state.spectators.size).toBe(2);
+    expect(countActiveSpectators(state.spectators)).toBe(1);
   });
 });
 

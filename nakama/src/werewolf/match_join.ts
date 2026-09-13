@@ -3,7 +3,7 @@
  * Pure logic shared by matchJoinAttempt / matchLeave and unit tests.
  */
 
-import { ConnectionStatus, GamePhase, GameState } from './types';
+import { ConnectionStatus, GamePhase, GameState, Spectator } from './types';
 
 export const PRIVATE_ROOM_PASSWORD_REJECT = '密码错误';
 
@@ -36,6 +36,24 @@ type JoinGameState = Pick<
 >;
 
 type SpectatorLeaveGameState = Pick<GameState, 'phase' | 'spectators'>;
+
+/**
+ * Connected spectators only. Disconnected entries stay in the map for
+ * password-free reconnect authorization but must not appear in live lists/counts.
+ */
+export function listActiveSpectators(
+  spectators: Map<string, Spectator>
+): Spectator[] {
+  return Array.from(spectators.values()).filter(
+    (s) => s.connection === ConnectionStatus.CONNECTED
+  );
+}
+
+export function countActiveSpectators(
+  spectators: Map<string, Spectator>
+): number {
+  return listActiveSpectators(spectators).length;
+}
 
 /**
  * Decide whether a presence may join a match.
@@ -95,6 +113,7 @@ export function evaluateMatchJoinAttempt(
 /**
  * Apply spectator leave, mirroring player disconnect retention during a match.
  * Removing mid-game would force private-room reconnects through the password gate.
+ * spectatorCount is the active (connected) count for client-facing leave events.
  */
 export function applySpectatorLeave(
   gameState: SpectatorLeaveGameState,
@@ -109,13 +128,13 @@ export function applySpectatorLeave(
     gameState.spectators.delete(userId);
     return {
       action: 'removed',
-      spectatorCount: gameState.spectators.size,
+      spectatorCount: countActiveSpectators(gameState.spectators),
     };
   }
 
   spectator.connection = ConnectionStatus.DISCONNECTED;
   return {
     action: 'disconnected',
-    spectatorCount: gameState.spectators.size,
+    spectatorCount: countActiveSpectators(gameState.spectators),
   };
 }
