@@ -38,6 +38,7 @@ import {
 } from './anti-cheat';
 import { logger as gameLogger, LogCategory, startTimer } from './logger';
 import { metrics, MetricNames, createMatchMetrics, MatchMetrics } from './metrics';
+import { handleInvitePasswordSignal } from './invite-password';
 import { createGameEventLogger, GameEventLogger, GameEventType } from './game-events';
 import {
   ReplayBuffer, ReplayPlayer, ReplayConfig, saveReplay, createReplayBuffer
@@ -1245,6 +1246,13 @@ matchSignal = function matchSignal(
   data: string
 ): { state: nkruntime.MatchState; data?: string } | null {
   logger.info(`Match signal received: ${data}`);
+
+  const gameState = state as GameState;
+  const invitePasswordResponse = handleInvitePasswordSignal(gameState, data);
+  if (invitePasswordResponse !== null) {
+    return { state, data: invitePasswordResponse };
+  }
+
   return { state, data: 'signal acknowledged' };
 }
 

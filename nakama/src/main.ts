@@ -27,6 +27,10 @@ import {
   getUserReplays, getReplay, getReplayByOwner, getReplayStats, getKeyEvents,
   GameReplay, ReplayListItem
 } from './werewolf/replay';
+import {
+  INVITE_PASSWORD_SIGNAL_TYPE,
+  InvitePasswordSignalResponse,
+} from './werewolf/invite-password';
 
 // Storage collection for user stats
 const STATS_COLLECTION = 'werewolf_stats';
@@ -674,17 +678,16 @@ function rpcSendInvite(
       });
     }
 
-    // Get match info
-    const matches = nk.matchList(1, true, undefined, undefined, undefined, `+match_id:${matchId}`);
-    if (matches.length === 0) {
+    // Get match info (label intentionally omits password; only exposes isPrivate)
+    const match = nk.matchGet(matchId);
+    if (!match) {
       return JSON.stringify({
         success: false,
         error: 'Match not found',
       });
     }
 
-    const match = matches[0];
-    let matchLabel: { roomName?: string; maxPlayers?: number; password?: string; phase?: string } = {};
+    let matchLabel: { roomName?: string; maxPlayers?: number; phase?: string; isPrivate?: boolean } = {};
     try {
       matchLabel = JSON.parse(match.label || '{}');
     } catch {
@@ -696,6 +699,29 @@ function rpcSendInvite(
       return JSON.stringify({
         success: false,
         error: 'Game has already started',
+      });
+    }
+
+    // Resolve password from authoritative match state; also verifies inviter is a member
+    let invitePassword: string | null | undefined;
+    try {
+      const signalRaw = nk.matchSignal(matchId, JSON.stringify({
+        type: INVITE_PASSWORD_SIGNAL_TYPE,
+        userId: ctx.userId,
+      }));
+      const signalResult = JSON.parse(signalRaw) as InvitePasswordSignalResponse;
+      if (!signalResult.ok) {
+        return JSON.stringify({
+          success: false,
+          error: 'Only current match members can send invites',
+        });
+      }
+      invitePassword = signalResult.password;
+    } catch (e) {
+      logger.error(`Failed to resolve invite password via matchSignal: ${e}`);
+      return JSON.stringify({
+        success: false,
+        error: 'Match not available',
       });
     }
 
@@ -724,7 +750,8 @@ function rpcSendInvite(
       maxPlayers: matchLabel.maxPlayers || 12,
       createdAt: now,
       expiresAt: now + INVITE_CONFIG.EXPIRE_TIME,
-      password: matchLabel.password, // Include password for private rooms
+      // Store password for accept-time return only (stripped from notifications/get_invites)
+      password: invitePassword ?? undefined,
     };
 
     // Store invite for sender (sent invites)
