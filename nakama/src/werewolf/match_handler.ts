@@ -42,6 +42,12 @@ import { createGameEventLogger, GameEventLogger, GameEventType } from './game-ev
 import {
   ReplayBuffer, ReplayPlayer, ReplayConfig, saveReplay, createReplayBuffer
 } from './replay';
+import {
+  applySpectatorLeave,
+  countActiveSpectators,
+  evaluateMatchJoinAttempt,
+  listActiveSpectators,
+} from './match_join';
 
 // Match-specific loggers and metrics storage
 const matchLoggers = new Map<string, GameEventLogger>();
@@ -279,8 +285,8 @@ function sendSpectatorFullState(
     };
   });
 
-  // Build spectator list
-  const spectatorList = Array.from(state.spectators.values()).map(s => ({
+  // Build spectator list (connected only; disconnected retain auth but stay hidden)
+  const spectatorList = listActiveSpectators(state.spectators).map(s => ({
     id: s.oderId,
     name: s.displayName,
     joinedAt: s.joinedAt,
@@ -319,10 +325,10 @@ function sendSpectatorFullState(
 }
 
 /**
- * Get all spectator presences
+ * Get connected spectator presences for live broadcasts
  */
 function getSpectatorPresences(state: GameState): nkruntime.Presence[] {
-  return Array.from(state.spectators.values()).map(s => ({
+  return listActiveSpectators(state.spectators).map(s => ({
     userId: s.oderId,
     sessionId: '',
     username: s.odername,
@@ -889,61 +895,37 @@ matchJoinAttempt = function matchJoinAttempt(
 ): { state: nkruntime.MatchState; accept: boolean; rejectMessage?: string } {
     const gameState = state as unknown as GameState;
     const isSpectator = metadata?.spectator === true;
+    const result = evaluateMatchJoinAttempt(gameState, presence.userId, metadata);
 
-    // Check if game already started
+    if (!result.accept) {
+      if (result.rejectMessage === '密码错误') {
+        logger.info(`Rejecting ${presence.username} - incorrect password`);
+      } else if (result.rejectMessage === 'Room is full') {
+        logger.info(`Rejecting ${presence.username} - room full`);
+      } else if (result.rejectMessage === 'Game already in progress') {
+        logger.info(`Rejecting ${presence.username} - game already in progress`);
+      } else {
+        logger.info(`Rejecting ${presence.username}`);
+      }
+      return { state, accept: false, rejectMessage: result.rejectMessage };
+    }
+
     if (gameState.phase !== GamePhase.WAITING) {
-      // Allow reconnection for existing players
       if (gameState.players.has(presence.userId)) {
         logger.info(`Player ${presence.username} reconnecting`);
-        return { state, accept: true };
-      }
-
-      // Allow reconnection for existing spectators
-      if (gameState.spectators.has(presence.userId)) {
+      } else if (gameState.spectators.has(presence.userId)) {
         logger.info(`Spectator ${presence.username} reconnecting`);
-        return { state, accept: true };
-      }
-
-      // Allow spectators to join during game
-      if (isSpectator) {
+      } else if (isSpectator) {
         logger.info(`Accepting ${presence.username} as spectator`);
-        return { state, accept: true };
       }
-
-      logger.info(`Rejecting ${presence.username} - game already in progress`);
-      return {
-        state,
-        accept: false,
-        rejectMessage: 'Game already in progress',
-      };
-    }
-
-    // Check password for private rooms
-    if (gameState.password !== null) {
-      const providedPassword = metadata?.password;
-      if (!providedPassword || providedPassword !== gameState.password) {
-        logger.info(`Rejecting ${presence.username} - incorrect password`);
-        return {
-          state,
-          accept: false,
-          rejectMessage: '密码错误',
-        };
+    } else {
+      if (gameState.password !== null) {
+        logger.info(`Password verified for ${presence.username}`);
       }
-      logger.info(`Password verified for ${presence.username}`);
+      logger.info(`Accepting ${presence.username} to join${isSpectator ? ' as spectator' : ''}`);
     }
 
-    // Check player limit (spectators don't count)
-    if (!isSpectator && gameState.players.size >= gameState.config.maxPlayers) {
-      logger.info(`Rejecting ${presence.username} - room full`);
-      return {
-        state,
-        accept: false,
-        rejectMessage: 'Room is full',
-      };
-    }
-
-  logger.info(`Accepting ${presence.username} to join${isSpectator ? ' as spectator' : ''}`);
-  return { state, accept: true };
+    return { state, accept: true };
 }
 
 /**
@@ -967,8 +949,19 @@ matchJoin = function matchJoin(
       // Check if reconnecting spectator
       const existingSpectator = gameState.spectators.get(presence.userId);
       if (existingSpectator) {
+        const wasDisconnected =
+          existingSpectator.connection === ConnectionStatus.DISCONNECTED;
         existingSpectator.connection = ConnectionStatus.CONNECTED;
         logger.info(`Spectator ${presence.username} reconnected`);
+
+        if (wasDisconnected) {
+          broadcastMessage(dispatcher, OpCode.SPECTATOR_JOIN, {
+            oderId: presence.userId,
+            odername: presence.username,
+            displayName: presence.username,
+            spectatorCount: countActiveSpectators(gameState.spectators),
+          });
+        }
 
         // Send full game state to spectator
         sendSpectatorFullState(gameState, dispatcher, presence);
@@ -1027,14 +1020,17 @@ matchJoin = function matchJoin(
           };
 
           gameState.spectators.set(presence.userId, spectator);
-          logger.info(`Spectator ${presence.username} joined (${gameState.spectators.size} spectators)`);
+          const activeSpectatorCount = countActiveSpectators(gameState.spectators);
+          logger.info(
+            `Spectator ${presence.username} joined (${activeSpectatorCount} spectators)`
+          );
 
           // Broadcast spectator join to all players and spectators
           broadcastMessage(dispatcher, OpCode.SPECTATOR_JOIN, {
             oderId: presence.userId,
             odername: presence.username,
             displayName: presence.username,
-            spectatorCount: gameState.spectators.size,
+            spectatorCount: activeSpectatorCount,
           });
 
           // Send full game state to spectator (includes all roles!)
@@ -1097,17 +1093,21 @@ matchLeave = function matchLeave(
       // Cleanup anti-cheat tracking for leaving players
       cleanupPlayer(presence.userId);
 
-      // Check if this is a spectator leaving
-      const spectator = gameState.spectators.get(presence.userId);
-      if (spectator) {
-        gameState.spectators.delete(presence.userId);
-        logger.info(`Spectator ${presence.username} left (${gameState.spectators.size} spectators remaining)`);
-
-        // Notify about spectator leaving
+      // Retain mid-game spectators on disconnect (same as players) so private-room
+      // reconnect stays password-free after matchLeave clears the live presence.
+      const spectatorLeave = applySpectatorLeave(gameState, presence.userId);
+      if (spectatorLeave) {
+        logger.info(
+          spectatorLeave.action === 'removed'
+            ? `Spectator ${presence.username} left (${spectatorLeave.spectatorCount} spectators remaining)`
+            : `Spectator ${presence.username} disconnected during game (${spectatorLeave.spectatorCount} active spectators; auth retained)`
+        );
+        // Emit leave for both lobby removes and mid-game disconnects so clients
+        // drop disconnected spectators from active lists/counts.
         broadcastMessage(dispatcher, OpCode.SPECTATOR_LEAVE, {
           oderId: presence.userId,
           odername: presence.username,
-          spectatorCount: gameState.spectators.size,
+          spectatorCount: spectatorLeave.spectatorCount,
         });
         continue;
       }
@@ -1223,7 +1223,7 @@ matchTerminate = function matchTerminate(
         phase: gameState.phase,
         dayNumber: gameState.dayNumber,
         playerCount: gameState.players.size,
-        spectatorCount: gameState.spectators.size,
+        spectatorCount: countActiveSpectators(gameState.spectators),
         winner: gameState.winner,
         graceSeconds
       }
