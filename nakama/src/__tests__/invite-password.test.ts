@@ -6,6 +6,8 @@ import { describe, it, expect } from 'bun:test';
 import {
   INVITE_PASSWORD_SIGNAL_TYPE,
   INVITE_SECRET_COLLECTION,
+  INVITE_SECRET_SWEEP_LEADERBOARD_ID,
+  STORAGE_LIST_ALL_OWNERS,
   resolveInvitePassword,
   handleInvitePasswordSignal,
   stripInvitePassword,
@@ -18,6 +20,7 @@ import {
   sweepExpiredInviteSecretsFromStorage,
   maybeSweepExpiredInviteSecrets,
   resetInviteSecretSweepClockForTests,
+  startInviteSecretExpiryScheduler,
 } from '../werewolf/invite-password';
 
 function createState(password: string | null, playerIds: string[]) {
@@ -39,9 +42,11 @@ function createMockNk() {
   }>();
   const keyOf = (collection: string, key: string, userId: string) =>
     `${collection}:${userId}:${key}`;
+  const storageListCalls: Array<{ userId: string; collection: string }> = [];
 
   return {
     store,
+    storageListCalls,
     nk: {
       storageWrite(writes: Array<{
         collection: string;
@@ -85,11 +90,16 @@ function createMockNk() {
           store.delete(keyOf(del.collection, del.key, del.userId));
         }
       },
-      storageList(userId: string | undefined, collection: string, limit?: number, cursor?: string) {
+      // Mirror Nakama 3.21.1: userId must be a string; '' lists across owners.
+      storageList(userId: string, collection: string, limit?: number, cursor?: string) {
+        if (typeof userId !== 'string') {
+          throw new Error('storageList userId must be a string; use "" for all users');
+        }
+        storageListCalls.push({ userId, collection });
         const pageSize = limit ?? 100;
         const all = Array.from(store.values())
           .filter((entry) => entry.collection === collection)
-          .filter((entry) => !userId || entry.userId === userId)
+          .filter((entry) => userId === STORAGE_LIST_ALL_OWNERS || entry.userId === userId)
           .sort((a, b) => a.key.localeCompare(b.key));
         const start = cursor ? Number.parseInt(cursor, 10) || 0 : 0;
         const slice = all.slice(start, start + pageSize);
@@ -109,6 +119,9 @@ function createMockNk() {
           objects,
           cursor: next < all.length ? String(next) : undefined,
         };
+      },
+      leaderboardCreate() {
+        return undefined;
       },
     } as unknown as nkruntime.Nakama,
   };
@@ -283,7 +296,7 @@ describe('invite secret storage', () => {
   });
 
   it('sweeps expired secrets from storage without requiring invite RPC writes', () => {
-    const { nk, store } = createMockNk();
+    const { nk, store, storageListCalls } = createMockNk();
     const now = Date.now();
     writeInviteSecret(nk, 'inv_stale', 'receiver-9', 'gone', now - 5_000);
     writeInviteSecret(nk, 'inv_fresh', 'receiver-9', 'keep', now + 60_000);
@@ -292,6 +305,7 @@ describe('invite secret storage', () => {
     expect(reclaimed).toEqual(['inv_stale']);
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-9:inv_stale`)).toBe(false);
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-9:inv_fresh`)).toBe(true);
+    expect(storageListCalls.every((call) => call.userId === STORAGE_LIST_ALL_OWNERS)).toBe(true);
   });
 
   it('pages through the entire invite-secret collection during expiry sweeps', () => {
@@ -321,5 +335,44 @@ describe('invite secret storage', () => {
     expect(maybeSweepExpiredInviteSecrets(nk, now + 1_000, 60_000)).toBeNull();
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_b`)).toBe(true);
     expect(maybeSweepExpiredInviteSecrets(nk, now + 60_000, 60_000)).toEqual(['inv_b']);
+  });
+
+  it('registers a recurring leaderboard-reset scheduler for idle-server expiry', () => {
+    const { nk, store } = createMockNk();
+    const now = Date.now();
+    writeInviteSecret(nk, 'inv_cron', 'receiver-cron', 'stale', now - 1);
+
+    let resetHandler:
+      | ((
+          ctx: nkruntime.Context,
+          logger: nkruntime.Logger,
+          nk: nkruntime.Nakama,
+          leaderboard: { id?: string },
+          reset: number
+        ) => void)
+      | null = null;
+
+    const logger = {
+      info() {},
+      warn() {},
+      error() {},
+      debug() {},
+    } as unknown as nkruntime.Logger;
+
+    startInviteSecretExpiryScheduler(nk, logger, {
+      registerLeaderboardReset(fn) {
+        resetHandler = fn;
+      },
+    });
+
+    expect(resetHandler).not.toBeNull();
+    resetHandler!(
+      {} as nkruntime.Context,
+      logger,
+      nk,
+      { id: INVITE_SECRET_SWEEP_LEADERBOARD_ID },
+      0
+    );
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-cron:inv_cron`)).toBe(false);
   });
 });

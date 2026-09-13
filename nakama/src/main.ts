@@ -37,6 +37,7 @@ import {
   reclaimSecretsForRemovedInvites,
   reclaimExpiredInviteSecrets,
   maybeSweepExpiredInviteSecrets,
+  startInviteSecretExpiryScheduler,
 } from './werewolf/invite-password';
 
 // Storage collection for user stats
@@ -57,6 +58,7 @@ function InitModule(
     registerBeforeRt: (id: string, fn: (ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkruntime.Nakama, envelope: any) => any) => void;
     registerAfterRt: (id: string, fn: (ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkruntime.Nakama, output: any, input: any) => void) => void;
     registerMatchmakerMatched: (fn: (ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkruntime.Nakama, matches: any[]) => string | void) => void;
+    registerLeaderboardReset: (fn: (ctx: nkruntime.Context, logger: nkruntime.Logger, nk: nkruntime.Nakama, leaderboard: any, reset: number) => void) => void;
   }
 ): void {
   logger.info('Werewolf Game Server initializing...');
@@ -99,9 +101,10 @@ function InitModule(
   initializer.registerMatchmakerMatched(onMatchmakerMatched);
   logger.info('Registered matchmaker callback');
 
-  // Match-independent invite-secret expiry sweep at module load; invite RPCs
-  // and live match loops also call the throttled sweeper so idle servers still
-  // reclaim credentials without requiring an active matchLoop.
+  // Match-independent recurring invite-secret expiry sweep via leaderboard cron.
+  // Also run once at module load; invite RPCs and live match loops still call the
+  // throttled sweeper opportunistically.
+  startInviteSecretExpiryScheduler(nk, logger, initializer);
   maybeSweepExpiredInviteSecrets(nk);
 
   logger.info('Werewolf Game Server initialized successfully!');

@@ -204,6 +204,18 @@ export function reclaimExpiredInviteSecrets(
 /** Minimum interval between collection-wide invite-secret expiry sweeps. */
 export const INVITE_SECRET_SWEEP_INTERVAL_MS = 60_000;
 
+/**
+ * Empty string is Nakama's all-owners sentinel for storageList (must be a string;
+ * undefined is rejected at runtime in Nakama 3.21.1).
+ */
+export const STORAGE_LIST_ALL_OWNERS = '';
+
+/** Authoritative leaderboard used as a cron hook for idle-server secret expiry. */
+export const INVITE_SECRET_SWEEP_LEADERBOARD_ID = 'werewolf_invite_secret_sweep';
+
+/** Cron: every minute — matches INVITE_SECRET_SWEEP_INTERVAL_MS. */
+export const INVITE_SECRET_SWEEP_CRON = '* * * * *';
+
 let lastInviteSecretSweepAt = 0;
 
 /**
@@ -244,9 +256,9 @@ export function sweepExpiredInviteSecretsFromStorage(
   try {
     let cursor: string | undefined;
     do {
-      // undefined userId lists the collection across owners (server runtime).
+      // Empty string lists the collection across owners (Nakama 3.21.1 server runtime).
       const listed = nk.storageList(
-        undefined as unknown as string,
+        STORAGE_LIST_ALL_OWNERS,
         INVITE_SECRET_COLLECTION,
         limit,
         cursor
@@ -301,6 +313,57 @@ export function maybeSweepExpiredInviteSecrets(
 /** Test helper: reset sweep throttle state. */
 export function resetInviteSecretSweepClockForTests(): void {
   lastInviteSecretSweepAt = 0;
+}
+
+type InviteSecretSweepInitializer = {
+  registerLeaderboardReset: (
+    fn: (
+      ctx: nkruntime.Context,
+      logger: nkruntime.Logger,
+      nk: nkruntime.Nakama,
+      leaderboard: { id?: string },
+      reset: number
+    ) => void
+  ) => void;
+};
+
+/**
+ * Install a lifecycle-independent recurring expiry sweep via leaderboard cron reset.
+ * Runs even when no matches are live and no invite RPCs are called.
+ */
+export function startInviteSecretExpiryScheduler(
+  nk: nkruntime.Nakama,
+  logger: nkruntime.Logger,
+  initializer: InviteSecretSweepInitializer
+): void {
+  initializer.registerLeaderboardReset((_ctx, resetLogger, resetNk, leaderboard) => {
+    if (leaderboard?.id !== INVITE_SECRET_SWEEP_LEADERBOARD_ID) {
+      return;
+    }
+    const reclaimed = sweepExpiredInviteSecretsFromStorage(resetNk);
+    if (reclaimed.length > 0) {
+      resetLogger.info(`Invite secret expiry sweep reclaimed ${reclaimed.length} credentials`);
+    }
+  });
+
+  try {
+    nk.leaderboardCreate(
+      INVITE_SECRET_SWEEP_LEADERBOARD_ID,
+      true,
+      'desc',
+      'set',
+      INVITE_SECRET_SWEEP_CRON,
+      { purpose: 'invite_secret_expiry_sweep' }
+    );
+    logger.info(
+      `Registered recurring invite-secret expiry scheduler (${INVITE_SECRET_SWEEP_CRON})`
+    );
+  } catch (error) {
+    // Leaderboard already exists from a previous module load — cron callback still applies.
+    logger.info(
+      `Invite-secret expiry scheduler leaderboard already present: ${error}`
+    );
+  }
 }
 
 /**
