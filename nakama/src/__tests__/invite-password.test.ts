@@ -17,6 +17,7 @@ import {
   deleteInviteSecret,
   reclaimSecretsForRemovedInvites,
   reclaimExpiredInviteSecrets,
+  expireAcceptedInviteRetryIfNeeded,
   sweepExpiredInviteSecretsFromStorage,
   maybeSweepExpiredInviteSecrets,
   resetInviteSecretSweepClockForTests,
@@ -293,6 +294,45 @@ describe('invite secret storage', () => {
     expect(invites[0].status).toBe('expired');
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_old`)).toBe(false);
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_live`)).toBe(true);
+  });
+
+  it('rejects accepted retries after expiresAt even when the throttled sweep has not run', () => {
+    const { nk, store } = createMockNk();
+    const now = 1_700_000_000_000;
+    writeInviteSecret(nk, 'inv_accepted', 'receiver-1', 'still-there', now - 1);
+
+    const invite = {
+      inviteId: 'inv_accepted',
+      receiverId: 'receiver-1',
+      status: 'accepted',
+      expiresAt: now - 1,
+    };
+
+    // Secret remains readable because the collection sweep is throttled / lagging.
+    expect(readInviteSecret(nk, 'inv_accepted', 'receiver-1')).toBe('still-there');
+
+    expect(expireAcceptedInviteRetryIfNeeded(nk, invite, now)).toBe(true);
+    expect(invite.status).toBe('expired');
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_accepted`)).toBe(false);
+    expect(readInviteSecret(nk, 'inv_accepted', 'receiver-1')).toBeUndefined();
+  });
+
+  it('allows accepted retries before expiresAt without deleting the credential', () => {
+    const { nk, store } = createMockNk();
+    const now = 1_700_000_000_000;
+    writeInviteSecret(nk, 'inv_live_accept', 'receiver-1', 'join-pass', now + 60_000);
+
+    const invite = {
+      inviteId: 'inv_live_accept',
+      receiverId: 'receiver-1',
+      status: 'accepted',
+      expiresAt: now + 60_000,
+    };
+
+    expect(expireAcceptedInviteRetryIfNeeded(nk, invite, now)).toBe(false);
+    expect(invite.status).toBe('accepted');
+    expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-1:inv_live_accept`)).toBe(true);
+    expect(readInviteSecret(nk, 'inv_live_accept', 'receiver-1')).toBe('join-pass');
   });
 
   it('sweeps expired secrets from storage without requiring invite RPC writes', () => {

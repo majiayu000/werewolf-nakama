@@ -36,6 +36,7 @@ import {
   deleteInviteSecret,
   reclaimSecretsForRemovedInvites,
   reclaimExpiredInviteSecrets,
+  expireAcceptedInviteRetryIfNeeded,
   maybeSweepExpiredInviteSecrets,
   startInviteSecretExpiryScheduler,
 } from './werewolf/invite-password';
@@ -922,6 +923,16 @@ function rpcRespondInvite(
         invite.status === InviteStatus.ACCEPTED &&
         invite.receiverId === ctx.userId
       ) {
+        const now = Date.now();
+        // Reject expired accepted retries even when the throttled sweep has not
+        // reclaimed the secret yet (up to INVITE_SECRET_SWEEP_INTERVAL_MS lag).
+        if (expireAcceptedInviteRetryIfNeeded(nk, invite, now)) {
+          writeInvites(nk, ctx.userId, 'received', invites);
+          return JSON.stringify({
+            success: false,
+            error: 'Invite has expired',
+          });
+        }
         const retrySecret = readInviteSecretResult(nk, inviteId, invite.receiverId);
         if (invite.requiresPassword && retrySecret.status !== 'found') {
           return JSON.stringify({

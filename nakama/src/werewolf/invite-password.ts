@@ -201,6 +201,27 @@ export function reclaimExpiredInviteSecrets(
   return reclaimed;
 }
 
+/**
+ * Enforce invite.expiresAt before serving an accepted-retry credential.
+ *
+ * The throttled collection sweep can leave a nearly-minute window where an
+ * expired secret is still readable; accepted retries must reject and delete
+ * independently of that sweep. Mutates invite.status to 'expired' when past
+ * expiresAt and returns true when the retry must be rejected.
+ */
+export function expireAcceptedInviteRetryIfNeeded(
+  nk: nkruntime.Nakama,
+  invite: InviteSecretReclaimTarget,
+  now: number = Date.now()
+): boolean {
+  if (typeof invite.expiresAt !== 'number' || invite.expiresAt >= now) {
+    return false;
+  }
+  invite.status = 'expired';
+  deleteInviteSecret(nk, invite.inviteId, invite.receiverId);
+  return true;
+}
+
 /** Minimum interval between collection-wide invite-secret expiry sweeps. */
 export const INVITE_SECRET_SWEEP_INTERVAL_MS = 60_000;
 
