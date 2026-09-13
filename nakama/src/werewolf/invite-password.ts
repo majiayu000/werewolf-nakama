@@ -153,6 +153,11 @@ export function migrateLegacyInvitePasswordIfNeeded(
   secretResult: InviteSecretReadResult
 ): InviteSecretReadResult {
   if (secretResult.status === 'found') {
+    // Secret already exists (possibly migrated from another invite copy).
+    // Still normalize this copy so writeInvites does not strip an unmarked
+    // legacy password and leave accept without requiresPassword.
+    invite.requiresPassword = true;
+    delete invite.password;
     return secretResult;
   }
 
@@ -288,16 +293,22 @@ export function expireAcceptedInviteRetryIfNeeded(
 /**
  * Invites the client should still see via get_invites.
  *
- * Pending invites are the normal inbox. Accepted invites remain visible until
- * expiresAt so a lost accept RPC response or failed join can rediscover the
- * invite ID and retry the idempotent accept path for password recovery.
+ * Pending invites are the normal inbox. On the received list only, accepted
+ * invites remain visible until expiresAt so a lost accept RPC response or
+ * failed join can rediscover the invite ID and retry the idempotent accept
+ * path for password recovery. Sent lists stay pending-only so the sender
+ * UI does not show a dead Cancel action after acceptance.
  */
 export function isInviteDiscoverableForClient(
   invite: { status: string; expiresAt: number },
-  now: number = Date.now()
+  now: number = Date.now(),
+  listType: 'sent' | 'received' = 'received'
 ): boolean {
   if (invite.status === 'pending') {
     return true;
+  }
+  if (listType !== 'received') {
+    return false;
   }
   return invite.status === 'accepted' &&
     typeof invite.expiresAt === 'number' &&
@@ -463,10 +474,16 @@ export function startInviteSecretExpiryScheduler(
       `Registered recurring invite-secret expiry scheduler (${INVITE_SECRET_SWEEP_CRON})`
     );
   } catch (error) {
-    // Leaderboard already exists from a previous module load — cron callback still applies.
-    logger.info(
-      `Invite-secret expiry scheduler leaderboard already present: ${error}`
-    );
+    const message = error instanceof Error ? error.message : String(error);
+    // Only suppress confirmed already-exists; transient DB failures must abort init
+    // so the idle-server sweep is not silently skipped.
+    if (/already exists/i.test(message)) {
+      logger.info(
+        `Invite-secret expiry scheduler leaderboard already present: ${error}`
+      );
+      return;
+    }
+    throw error;
   }
 }
 

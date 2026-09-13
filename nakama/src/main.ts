@@ -821,8 +821,9 @@ function rpcSendInvite(
 
 /**
  * RPC: Get discoverable invites for the current user.
- * Returns pending invites plus unexpired accepted invites (for accept-retry
- * password recovery after a lost RPC response or failed join).
+ * Returns pending invites; for type=received also returns unexpired accepted
+ * invites (accept-retry password recovery after a lost RPC response or failed
+ * join). Sent lists remain pending-only.
  */
 function rpcGetInvites(
   ctx: nkruntime.Context,
@@ -856,8 +857,8 @@ function rpcGetInvites(
       ) {
         hasExpired = true;
       }
-      // Pending + unexpired accepted (password never lives on invite objects)
-      if (isInviteDiscoverableForClient(invite, now)) {
+      // Pending + unexpired accepted on received list only (password recovery)
+      if (isInviteDiscoverableForClient(invite, now, type === 'sent' ? 'sent' : 'received')) {
         validInvites.push(stripInvitePassword(invite));
       }
     }

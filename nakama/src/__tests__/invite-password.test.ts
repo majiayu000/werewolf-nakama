@@ -437,14 +437,13 @@ describe('invite secret storage', () => {
     expect(sanitized[0].requiresPassword).toBe(true);
   });
 
-  it('does not migrate when a server-only secret already exists', () => {
+  it('normalizes requiresPassword when a server-only secret already exists', () => {
     const { nk } = createMockNk();
     writeInviteSecret(nk, 'inv_present', 'receiver-1', 'secret-pass', Date.now() + 60_000);
     const invite = {
       inviteId: 'inv_present',
       receiverId: 'receiver-1',
       password: 'stale-inline',
-      requiresPassword: true,
     };
 
     const result = migrateLegacyInvitePasswordIfNeeded(
@@ -454,7 +453,8 @@ describe('invite secret storage', () => {
     );
 
     expect(result).toEqual({ status: 'found', password: 'secret-pass' });
-    expect(invite.password).toBe('stale-inline');
+    expect(invite.requiresPassword).toBe(true);
+    expect('password' in invite).toBe(false);
   });
 
   it('registers a recurring leaderboard-reset scheduler for idle-server expiry', () => {
@@ -496,11 +496,51 @@ describe('invite secret storage', () => {
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-cron:inv_cron`)).toBe(false);
   });
 
+  it('rethrows non-already-exists leaderboardCreate failures during scheduler setup', () => {
+    const { nk } = createMockNk();
+    (nk as unknown as { leaderboardCreate: () => void }).leaderboardCreate = () => {
+      throw new Error('database connection refused');
+    };
+    const logger = {
+      info() {},
+      warn() {},
+      error() {},
+      debug() {},
+    } as unknown as nkruntime.Logger;
+
+    expect(() =>
+      startInviteSecretExpiryScheduler(nk, logger, {
+        registerLeaderboardReset() {},
+      })
+    ).toThrow(/database connection refused/);
+  });
+
+  it('suppresses already-exists leaderboardCreate failures during scheduler setup', () => {
+    const { nk } = createMockNk();
+    (nk as unknown as { leaderboardCreate: () => void }).leaderboardCreate = () => {
+      throw new Error('Leaderboard already exists');
+    };
+    const logger = {
+      info() {},
+      warn() {},
+      error() {},
+      debug() {},
+    } as unknown as nkruntime.Logger;
+
+    expect(() =>
+      startInviteSecretExpiryScheduler(nk, logger, {
+        registerLeaderboardReset() {},
+      })
+    ).not.toThrow();
+  });
+
   it('keeps unexpired accepted invites discoverable for get_invites recovery', () => {
     const now = Date.now();
     expect(isInviteDiscoverableForClient({ status: 'pending', expiresAt: now + 60_000 }, now)).toBe(true);
-    expect(isInviteDiscoverableForClient({ status: 'accepted', expiresAt: now + 60_000 }, now)).toBe(true);
-    expect(isInviteDiscoverableForClient({ status: 'accepted', expiresAt: now - 1 }, now)).toBe(false);
+    expect(isInviteDiscoverableForClient({ status: 'accepted', expiresAt: now + 60_000 }, now, 'received')).toBe(true);
+    expect(isInviteDiscoverableForClient({ status: 'accepted', expiresAt: now - 1 }, now, 'received')).toBe(false);
+    expect(isInviteDiscoverableForClient({ status: 'accepted', expiresAt: now + 60_000 }, now, 'sent')).toBe(false);
+    expect(isInviteDiscoverableForClient({ status: 'pending', expiresAt: now + 60_000 }, now, 'sent')).toBe(true);
     expect(isInviteDiscoverableForClient({ status: 'declined', expiresAt: now + 60_000 }, now)).toBe(false);
     expect(isInviteDiscoverableForClient({ status: 'expired', expiresAt: now + 60_000 }, now)).toBe(false);
     expect(isInviteDiscoverableForClient({ status: 'cancelled', expiresAt: now + 60_000 }, now)).toBe(false);
