@@ -547,6 +547,7 @@ export const zh = {
     pending: '待处理',
     accept: '接受',
     decline: '拒绝',
+    retry: '重新加入',
     cancel: '取消邀请',
     expired: '已过期',
     expiresIn: '{{time}}后过期',

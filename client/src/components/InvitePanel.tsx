@@ -6,7 +6,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
-import { GameInvite, SearchedUser } from '../types/werewolf';
+import { GameInvite, InviteStatus, SearchedUser } from '../types/werewolf';
 
 interface InvitePanelProps {
   matchId: string | null;
@@ -140,24 +140,36 @@ function InviteCard({
       </div>
 
       {type === 'received' ? (
-        <div className="flex gap-2">
+        invite.status === InviteStatus.ACCEPTED ? (
+          // Accepted recovery: only retry join — Decline is rejected by the server
           <button
             onClick={onAccept}
             disabled={loading}
-            className="flex-1 py-2 bg-green-600 hover:bg-green-500 disabled:bg-gray-600
+            className="w-full py-2 bg-green-600 hover:bg-green-500 disabled:bg-gray-600
                        text-white rounded-lg text-sm font-medium transition-colors"
           >
-            {t('invite.accept')}
+            {t('invite.retry')}
           </button>
-          <button
-            onClick={onDecline}
-            disabled={loading}
-            className="flex-1 py-2 bg-red-600/20 hover:bg-red-600/30 disabled:bg-gray-600/20
-                       text-red-400 rounded-lg text-sm font-medium transition-colors border border-red-600/30"
-          >
-            {t('invite.decline')}
-          </button>
-        </div>
+        ) : (
+          <div className="flex gap-2">
+            <button
+              onClick={onAccept}
+              disabled={loading}
+              className="flex-1 py-2 bg-green-600 hover:bg-green-500 disabled:bg-gray-600
+                         text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              {t('invite.accept')}
+            </button>
+            <button
+              onClick={onDecline}
+              disabled={loading}
+              className="flex-1 py-2 bg-red-600/20 hover:bg-red-600/30 disabled:bg-gray-600/20
+                         text-red-400 rounded-lg text-sm font-medium transition-colors border border-red-600/30"
+            >
+              {t('invite.decline')}
+            </button>
+          </div>
+        )
       ) : (
         <button
           onClick={onCancel}
@@ -405,8 +417,11 @@ export default function InvitePanel({
     }
   }, [onRespondInvite, onJoinMatch, loadInvites, t]);
 
-  // 拒绝邀请
+  // 拒绝邀请（已接受的恢复条目不可拒绝）
   const handleDeclineInvite = useCallback(async (invite: GameInvite) => {
+    if (invite.status === InviteStatus.ACCEPTED) {
+      return;
+    }
     setRespondingInvites(prev => new Set(prev).add(invite.inviteId));
     try {
       const result = await onRespondInvite(invite.inviteId, false);

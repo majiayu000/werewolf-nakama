@@ -547,6 +547,7 @@ export const en = {
     pending: 'Pending',
     accept: 'Accept',
     decline: 'Decline',
+    retry: 'Retry Join',
     cancel: 'Cancel Invite',
     expired: 'Expired',
     expiresIn: 'Expires in {{time}}',
