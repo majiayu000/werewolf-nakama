@@ -20,6 +20,8 @@ import {
   DEFAULT_GAME_CONFIG,
   PRESET_CONFIGS,
   getRoleFaction,
+  getFinalGuardActionsByPlayer,
+  computePlayerFactionSize,
   isWerewolf,
   PlayerExtendedState,
 } from './types';
@@ -1627,6 +1629,21 @@ function handleUseSkill(
       if (state.nightSubPhase === NightSubPhase.GUARD && targetId) {
         // Can't protect same person two nights in a row
         if (extState && extState.lastProtectedBy !== targetId) {
+          // Clear this guard's previous same-night protection before switching targets
+          for (const prev of state.nightActions) {
+            if (
+              prev.role === Role.GUARD &&
+              prev.playerId === player.oderId &&
+              prev.targetId &&
+              prev.targetId !== targetId
+            ) {
+              const prevExt = state.extendedStates.get(prev.targetId);
+              // Only clear if no other guard's final intent still covers them
+              // (final reconciliation happens in processNightResults)
+              if (prevExt) prevExt.isProtected = false;
+            }
+          }
+
           state.guardTarget = targetId;
           extState.lastProtectedBy = targetId;
           state.nightActions.push(action);
@@ -2047,19 +2064,21 @@ function processNightResults(
   // Check wolf kill
   if (state.wolfTarget) {
     const target = state.players.get(state.wolfTarget);
-    const targetExt = state.extendedStates.get(state.wolfTarget);
 
     if (target && target.status === PlayerStatus.ALIVE) {
-      // Check if protected by guard
-      if (targetExt?.isProtected) {
+      // Final accepted guard action per guard — ignore earlier alternating targets
+      const finalGuardActions = getFinalGuardActionsByPlayer(state.nightActions);
+      const protectingGuards = Array.from(finalGuardActions.values()).filter(
+        a => a.targetId === state.wolfTarget
+      );
+
+      // Check if protected by guard (final action only; stale isProtected is ignored)
+      if (protectingGuards.length > 0) {
         logger.info(`${target.displayName} was protected by guard`);
-        // Credit only the guard(s) who actually protected this wolf target
-        for (const nightAction of state.nightActions) {
-          if (nightAction.role === Role.GUARD && nightAction.targetId === state.wolfTarget) {
-            const guardExt = state.extendedStates.get(nightAction.playerId);
-            if (guardExt) {
-              guardExt.guardSaves = (guardExt.guardSaves || 0) + 1;
-            }
+        for (const nightAction of protectingGuards) {
+          const guardExt = state.extendedStates.get(nightAction.playerId);
+          if (guardExt) {
+            guardExt.guardSaves = (guardExt.guardSaves || 0) + 1;
           }
         }
       }
@@ -2514,11 +2533,20 @@ function recordGameStats(
           isWinner = faction !== Faction.WEREWOLF;
         }
 
-        // Alive same-faction size (for LAST_STAND / COMEBACK_KING)
-        const playerFactionSize = nonSpectators.filter(other => {
-          if (other.status !== PlayerStatus.ALIVE || !other.role) return false;
-          return getRoleFaction(other.role) === faction;
-        }).length;
+        // Alive same-faction size (for LAST_STAND / COMEBACK_KING).
+        // Neutrals share the villager win bucket; lovers wins size the lovers pair.
+        const aliveForSize = nonSpectators
+          .filter(other => other.status === PlayerStatus.ALIVE)
+          .map(other => ({
+            role: other.role,
+            isLover: !!state.extendedStates.get(other.oderId)?.isLovers,
+          }));
+        const playerFactionSize = computePlayerFactionSize({
+          winner,
+          playerRole: p.role,
+          playerIsLover: isLover,
+          alivePlayers: aliveForSize,
+        });
 
         return {
           // Shared writer accepts userId; match players use oderId as Nakama user id

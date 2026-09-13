@@ -911,6 +911,55 @@ export function getRoleFaction(role: Role): Faction {
   return ROLE_CONFIG[role].faction;
 }
 
+/**
+ * Win-condition faction mapping: neutrals (Cupid/Thief) count with villagers.
+ * Keep in sync with checkWinCondition / lovers cross-faction checks.
+ */
+export function getEffectiveWinFaction(role: Role): Faction {
+  const faction = getRoleFaction(role);
+  return faction === Faction.NEUTRAL ? Faction.VILLAGER : faction;
+}
+
+/**
+ * Collapse duplicate same-night guard actions to each guard's final accepted target.
+ * handleUseSkill appends every alternating protect (A→B→A); only the last entry counts.
+ */
+export function getFinalGuardActionsByPlayer(
+  nightActions: NightAction[]
+): Map<string, NightAction> {
+  const byPlayer = new Map<string, NightAction>();
+  for (const action of nightActions) {
+    if (action.role === Role.GUARD && action.targetId) {
+      byPlayer.set(action.playerId, action);
+    }
+  }
+  return byPlayer;
+}
+
+/**
+ * Alive ally count for LAST_STAND / COMEBACK_KING.
+ * Uses effective win factions; lovers victories size the lovers pair, not origin roles.
+ */
+export function computePlayerFactionSize(opts: {
+  winner: Faction;
+  playerRole: Role | null | undefined;
+  playerIsLover: boolean;
+  alivePlayers: Array<{ role: Role | null | undefined; isLover: boolean }>;
+}): number {
+  const { winner, playerRole, playerIsLover, alivePlayers } = opts;
+
+  if (winner === Faction.LOVERS) {
+    if (!playerIsLover) return 0;
+    return alivePlayers.filter(p => p.isLover).length;
+  }
+
+  if (!playerRole) return 0;
+  const faction = getEffectiveWinFaction(playerRole);
+  return alivePlayers.filter(
+    p => p.role != null && getEffectiveWinFaction(p.role) === faction
+  ).length;
+}
+
 // ============================================================================
 // 好友邀请系统 (Friend Invite System)
 // ============================================================================

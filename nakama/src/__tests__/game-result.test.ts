@@ -16,6 +16,8 @@ import {
   AchievementId,
   ACHIEVEMENT_CONFIG,
   XP_REWARDS,
+  getFinalGuardActionsByPlayer,
+  computePlayerFactionSize,
 } from '../werewolf/types';
 import { createMockLogger } from './test-utils';
 
@@ -319,6 +321,59 @@ describe('applyGameResultStats', () => {
     const aliveAchievements = readAchievements(nk, soleSurvivor);
     expect(aliveAchievements.achievements[AchievementId.LAST_STAND]?.completed).toBe(true);
     expect(aliveAchievements.achievements[AchievementId.COMEBACK_KING]?.completed).toBe(true);
+  });
+
+  test('dedupes alternating guard actions to the final target per night', () => {
+    const actions = [
+      { playerId: 'guard-1', role: Role.GUARD, action: 'protect', targetId: 'A', timestamp: 1 },
+      { playerId: 'guard-1', role: Role.GUARD, action: 'protect', targetId: 'B', timestamp: 2 },
+      { playerId: 'guard-1', role: Role.GUARD, action: 'protect', targetId: 'A', timestamp: 3 },
+    ];
+
+    const finalByPlayer = getFinalGuardActionsByPlayer(actions);
+    expect(finalByPlayer.size).toBe(1);
+    expect(finalByPlayer.get('guard-1')?.targetId).toBe('A');
+
+    // Counting matching entries without dedupe would yield 2; final action yields 1
+    const matchingRaw = actions.filter(a => a.targetId === 'A').length;
+    expect(matchingRaw).toBe(2);
+    const matchingFinal = Array.from(finalByPlayer.values()).filter(a => a.targetId === 'A').length;
+    expect(matchingFinal).toBe(1);
+  });
+
+  test('sizes sole-survivor factions with effective allies and lovers', () => {
+    // Cupid (neutral) must count living villagers as allies on a village win
+    expect(computePlayerFactionSize({
+      winner: Faction.VILLAGER,
+      playerRole: Role.CUPID,
+      playerIsLover: false,
+      alivePlayers: [
+        { role: Role.CUPID, isLover: false },
+        { role: Role.VILLAGER, isLover: false },
+        { role: Role.SEER, isLover: false },
+      ],
+    })).toBe(3);
+
+    // Raw NEUTRAL-only sizing would incorrectly report 1
+    expect(computePlayerFactionSize({
+      winner: Faction.VILLAGER,
+      playerRole: Role.CUPID,
+      playerIsLover: false,
+      alivePlayers: [
+        { role: Role.CUPID, isLover: false },
+      ],
+    })).toBe(1);
+
+    // Lovers victory sizes the lovers pair, not origin factions
+    expect(computePlayerFactionSize({
+      winner: Faction.LOVERS,
+      playerRole: Role.VILLAGER,
+      playerIsLover: true,
+      alivePlayers: [
+        { role: Role.VILLAGER, isLover: true },
+        { role: Role.WEREWOLF, isLover: true },
+      ],
+    })).toBe(2);
   });
 
   test('skips achievements when evaluateAchievements is false', () => {
