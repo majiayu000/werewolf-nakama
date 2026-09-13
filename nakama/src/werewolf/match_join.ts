@@ -1,9 +1,9 @@
 /**
  * Match join authorization helpers
- * Pure logic shared by matchJoinAttempt and unit tests.
+ * Pure logic shared by matchJoinAttempt / matchLeave and unit tests.
  */
 
-import { GamePhase, GameState } from './types';
+import { ConnectionStatus, GamePhase, GameState } from './types';
 
 export const PRIVATE_ROOM_PASSWORD_REJECT = '密码错误';
 
@@ -26,10 +26,16 @@ export type JoinAttemptResult = {
   rejectMessage?: string;
 };
 
+export type SpectatorLeaveResult =
+  | { action: 'removed'; spectatorCount: number }
+  | { action: 'disconnected'; spectatorCount: number };
+
 type JoinGameState = Pick<
   GameState,
   'phase' | 'players' | 'spectators' | 'password' | 'config'
 >;
+
+type SpectatorLeaveGameState = Pick<GameState, 'phase' | 'spectators'>;
 
 /**
  * Decide whether a presence may join a match.
@@ -48,6 +54,7 @@ export function evaluateMatchJoinAttempt(
       return { accept: true };
     }
 
+    // Includes disconnected spectators retained for password-free reconnect.
     if (gameState.spectators.has(userId)) {
       return { accept: true };
     }
@@ -83,4 +90,32 @@ export function evaluateMatchJoinAttempt(
   }
 
   return { accept: true };
+}
+
+/**
+ * Apply spectator leave, mirroring player disconnect retention during a match.
+ * Removing mid-game would force private-room reconnects through the password gate.
+ */
+export function applySpectatorLeave(
+  gameState: SpectatorLeaveGameState,
+  userId: string
+): SpectatorLeaveResult | null {
+  const spectator = gameState.spectators.get(userId);
+  if (!spectator) {
+    return null;
+  }
+
+  if (gameState.phase === GamePhase.WAITING) {
+    gameState.spectators.delete(userId);
+    return {
+      action: 'removed',
+      spectatorCount: gameState.spectators.size,
+    };
+  }
+
+  spectator.connection = ConnectionStatus.DISCONNECTED;
+  return {
+    action: 'disconnected',
+    spectatorCount: gameState.spectators.size,
+  };
 }

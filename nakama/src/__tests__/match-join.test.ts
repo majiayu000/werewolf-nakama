@@ -10,6 +10,7 @@ import {
   resetPlayerIdCounter,
 } from './test-utils';
 import {
+  applySpectatorLeave,
   evaluateMatchJoinAttempt,
   isPrivateRoomPasswordValid,
   PRIVATE_ROOM_PASSWORD_REJECT,
@@ -41,6 +42,72 @@ describe('isPrivateRoomPasswordValid', () => {
     expect(isPrivateRoomPasswordValid('secret', undefined)).toBe(false);
     expect(isPrivateRoomPasswordValid('secret', '')).toBe(false);
     expect(isPrivateRoomPasswordValid('secret', 'wrong')).toBe(false);
+  });
+});
+
+describe('applySpectatorLeave — retain mid-game authorization', () => {
+  beforeEach(() => {
+    resetPlayerIdCounter();
+  });
+
+  test('marks mid-game spectator disconnected without deleting authorization', () => {
+    const spectator = createSpectator({ oderId: 'spec-drop' });
+    const state = createTestGameState({
+      phase: GamePhase.NIGHT,
+      password: 'room-pass',
+      spectators: new Map([[spectator.oderId, spectator]]),
+    });
+
+    const leave = applySpectatorLeave(state, spectator.oderId);
+
+    expect(leave).toEqual({
+      action: 'disconnected',
+      spectatorCount: 1,
+    });
+    expect(state.spectators.has(spectator.oderId)).toBe(true);
+    expect(state.spectators.get(spectator.oderId)?.connection).toBe(
+      ConnectionStatus.DISCONNECTED
+    );
+  });
+
+  test('removes spectators only while waiting', () => {
+    const spectator = createSpectator({ oderId: 'spec-lobby' });
+    const state = createTestGameState({
+      phase: GamePhase.WAITING,
+      password: 'lobby-pass',
+      spectators: new Map([[spectator.oderId, spectator]]),
+    });
+
+    const leave = applySpectatorLeave(state, spectator.oderId);
+
+    expect(leave).toEqual({
+      action: 'removed',
+      spectatorCount: 0,
+    });
+    expect(state.spectators.has(spectator.oderId)).toBe(false);
+  });
+
+  test('after disconnect, private-room reconnect without password is accepted', () => {
+    const player = createTestPlayer({ oderId: 'host-1' });
+    const spectator = createSpectator({ oderId: 'spec-reconnect' });
+    const state = createTestGameState({
+      phase: GamePhase.DAY_DISCUSSION,
+      password: 'room-pass',
+      players: new Map([[player.oderId, player]]),
+      spectators: new Map([[spectator.oderId, spectator]]),
+    });
+
+    applySpectatorLeave(state, spectator.oderId);
+
+    const result = evaluateMatchJoinAttempt(state, spectator.oderId, {
+      spectator: true,
+    });
+
+    expect(state.spectators.get(spectator.oderId)?.connection).toBe(
+      ConnectionStatus.DISCONNECTED
+    );
+    expect(result.accept).toBe(true);
+    expect(result.rejectMessage).toBeUndefined();
   });
 });
 
@@ -102,6 +169,26 @@ describe('evaluateMatchJoinAttempt — SEC-03 private mid-game spectator', () =>
   test('allows existing spectator reconnect without password', () => {
     const player = createTestPlayer({ oderId: 'host-1' });
     const spectator = createSpectator({ oderId: 'spec-reconnect' });
+    const state = createTestGameState({
+      phase: GamePhase.NIGHT,
+      password: 'room-pass',
+      players: new Map([[player.oderId, player]]),
+      spectators: new Map([[spectator.oderId, spectator]]),
+    });
+
+    const result = evaluateMatchJoinAttempt(state, spectator.oderId, {
+      spectator: true,
+    });
+
+    expect(result.accept).toBe(true);
+  });
+
+  test('allows disconnected spectator reconnect without password', () => {
+    const player = createTestPlayer({ oderId: 'host-1' });
+    const spectator = createSpectator({
+      oderId: 'spec-disconnected',
+      connection: ConnectionStatus.DISCONNECTED,
+    });
     const state = createTestGameState({
       phase: GamePhase.NIGHT,
       password: 'room-pass',
