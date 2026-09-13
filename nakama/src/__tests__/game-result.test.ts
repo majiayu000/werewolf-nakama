@@ -209,4 +209,84 @@ describe('applyGameResultStats', () => {
     expect(stats.totalGames).toBe(3);
     expect(stats.wins).toBe(2);
   });
+
+  test('does not award SILENT_KILLER when wasExposed is omitted', () => {
+    const userId = 'wolf-unknown-exposure';
+
+    applyGameResultStats(nk, logger as any, {
+      players: [{
+        userId,
+        role: Role.WEREWOLF,
+        faction: Faction.WEREWOLF,
+        isWinner: true,
+        isAlive: true,
+        // wasExposed intentionally omitted
+      }],
+      winner: Faction.WEREWOLF,
+    });
+
+    const achievements = readAchievements(nk, userId);
+    expect(achievements.achievements[AchievementId.SILENT_KILLER]?.completed).toBeFalsy();
+  });
+
+  test('awards SILENT_KILLER only when wasExposed is explicitly false', () => {
+    const userId = 'wolf-silent';
+
+    applyGameResultStats(nk, logger as any, {
+      players: [{
+        userId,
+        role: Role.WEREWOLF,
+        faction: Faction.WEREWOLF,
+        isWinner: true,
+        isAlive: true,
+        wasExposed: false,
+      }],
+      winner: Faction.WEREWOLF,
+    });
+
+    const achievements = readAchievements(nk, userId);
+    expect(achievements.achievements[AchievementId.SILENT_KILLER]?.completed).toBe(true);
+  });
+
+  test('advances skill achievements from real match outcomes', () => {
+    const userId = 'seer-accurate';
+
+    applyGameResultStats(nk, logger as any, {
+      players: [{
+        userId,
+        role: Role.SEER,
+        faction: Faction.VILLAGER,
+        isWinner: true,
+        isAlive: true,
+        seerCheckedWolves: 2,
+      }],
+      winner: Faction.VILLAGER,
+    });
+
+    const achievements = readAchievements(nk, userId);
+    expect(achievements.achievements[AchievementId.SEER_CORRECT_10]?.current).toBe(2);
+  });
+
+  test('skips achievements when evaluateAchievements is false', () => {
+    const userId = 'stats-only';
+
+    applyGameResultStats(nk, logger as any, {
+      players: [{
+        userId,
+        role: Role.VILLAGER,
+        faction: Faction.VILLAGER,
+        isWinner: true,
+        isAlive: true,
+      }],
+      winner: Faction.VILLAGER,
+      evaluateAchievements: false,
+    });
+
+    const stats = readUserStats(nk, userId);
+    expect(stats.totalGames).toBe(1);
+    expect(stats.wins).toBe(1);
+
+    const achievements = readAchievements(nk, userId);
+    expect(achievements.achievements[AchievementId.FIRST_GAME]?.completed).toBeFalsy();
+  });
 });

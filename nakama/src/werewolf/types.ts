@@ -368,6 +368,16 @@ export interface PlayerExtendedState {
   idiotRevealed: boolean;  // 白痴是否已翻牌
   isLovers: boolean;       // 是否是情侣
   loverId: string | null;  // 情侣对象 ID
+  /** Achievement skill counters accumulated during the match */
+  seerCheckedWolves: number;
+  witchSaved: boolean;
+  witchPoisonedWolf: boolean;
+  guardSaved: boolean;
+  hunterKilledWolf: boolean;
+  /** True once a seer has checked this werewolf */
+  wasExposed: boolean;
+  /** Wolves this player helped vote out */
+  votedOutWolves: number;
 }
 
 // ============================================================================
@@ -449,6 +459,8 @@ export interface GameState {
   // 游戏结果
   winner: Faction | null;
   gameEndReason: string | null;
+  /** When endGame ran without nk, flush stats/replay on next matchLoop tick */
+  pendingStatsRecord: boolean;
 
   // 私密房间相关
   password: string | null;         // 房间密码（null 表示公开房间）

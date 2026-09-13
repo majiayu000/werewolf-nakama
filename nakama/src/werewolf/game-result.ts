@@ -51,6 +51,12 @@ export interface ApplyGameResultInput {
   players: GameResultPlayer[];
   winner: Faction | string;
   sheriffId?: string | null;
+  /**
+   * When false, only update XP/stats (legacy record_game_result compatibility).
+   * Achievements remain the responsibility of update_achievements / match path.
+   * Defaults to true.
+   */
+  evaluateAchievements?: boolean;
 }
 
 export interface LevelUpInfo {
@@ -269,18 +275,30 @@ export interface EvaluateAchievementsInput {
   idiotRevealed?: boolean;
   playerFactionSize?: number;
   votedOutWolves?: number;
+  /**
+   * Explicit exposure flag for SILENT_KILLER.
+   * Only `false` awards the achievement; `undefined`/omitted is ineligible.
+   */
   wasExposed?: boolean;
 }
 
+export interface EvaluateAchievementsResult {
+  newUnlocks: AchievementUnlock[];
+  totalXPGained: number;
+  stats: UserStats;
+  /** Achievements storage object ready to batch-write with stats */
+  achievementsWrite: nkruntime.StorageWriteRequest;
+}
+
 /**
- * Evaluate and persist achievements for a player after stats have been updated.
- * Returns unlocks and mutates stats in-place if achievement XP is awarded.
+ * Evaluate achievements for a player after stats have been updated.
+ * Does not persist — caller must write `achievementsWrite` (and updated stats) atomically.
  */
 export function evaluateAchievements(
   nk: nkruntime.Nakama,
   logger: nkruntime.Logger | null,
   input: EvaluateAchievementsInput
-): { newUnlocks: AchievementUnlock[]; totalXPGained: number; stats: UserStats } {
+): EvaluateAchievementsResult {
   const {
     userId,
     stats,
@@ -299,7 +317,7 @@ export function evaluateAchievements(
     idiotRevealed = false,
     playerFactionSize = 0,
     votedOutWolves = 0,
-    wasExposed = false,
+    wasExposed,
   } = input;
 
   const userAchievements = readAchievements(nk, userId);
@@ -340,6 +358,15 @@ export function evaluateAchievements(
     if (!progress.completed) {
       checkAndUnlock(achievementId, progress.current + 1);
     }
+  };
+
+  const checkLevelAchievements = () => {
+    const levelInfo = calculateLevelInfo(stats.totalXP);
+    checkAndUnlock(AchievementId.LEVEL_10, levelInfo.level);
+    checkAndUnlock(AchievementId.LEVEL_25, levelInfo.level);
+    checkAndUnlock(AchievementId.LEVEL_50, levelInfo.level);
+    checkAndUnlock(AchievementId.LEVEL_75, levelInfo.level);
+    checkAndUnlock(AchievementId.LEVEL_100, levelInfo.level);
   };
 
   // Beginner
@@ -409,7 +436,7 @@ export function evaluateAchievements(
     }
   }
 
-  // Skill achievements (defaulted when match state lacks counters)
+  // Skill achievements
   if (role === Role.SEER && seerCheckedWolves > 0) {
     const currentProgress = userAchievements.achievements[AchievementId.SEER_CORRECT_10]?.current || 0;
     const newTotal = currentProgress + seerCheckedWolves;
@@ -450,7 +477,8 @@ export function evaluateAchievements(
   if (won && role && !isWerewolf(role as Role) && votedOutWolves >= 2) {
     incrementAndCheck(AchievementId.WOLF_EXTERMINATOR);
   }
-  if (won && role && isWerewolf(role as Role) && !wasExposed) {
+  // Require explicit wasExposed === false; omitted/undefined is ineligible
+  if (won && role && isWerewolf(role as Role) && wasExposed === false) {
     incrementAndCheck(AchievementId.SILENT_KILLER);
   }
   if (won && role && !isWerewolf(role as Role) && playerFactionSize === 1) {
@@ -468,18 +496,7 @@ export function evaluateAchievements(
     checkAndUnlock(AchievementId.SURVIVOR_50, newSurvivals);
   }
 
-  // Level
-  const levelInfo = calculateLevelInfo(stats.totalXP);
-  checkAndUnlock(AchievementId.LEVEL_10, levelInfo.level);
-  checkAndUnlock(AchievementId.LEVEL_25, levelInfo.level);
-  checkAndUnlock(AchievementId.LEVEL_50, levelInfo.level);
-  checkAndUnlock(AchievementId.LEVEL_75, levelInfo.level);
-  checkAndUnlock(AchievementId.LEVEL_100, levelInfo.level);
-
-  userAchievements.totalXPFromAchievements += totalXPGained;
-  userAchievements.lastUpdated = Date.now();
-  writeAchievements(nk, userId, userAchievements);
-
+  // Apply achievement XP, then re-check level achievements (cascade until stable)
   if (totalXPGained > 0) {
     stats.totalXP += totalXPGained;
     const newLevelInfo = calculateLevelInfo(stats.totalXP);
@@ -487,11 +504,60 @@ export function evaluateAchievements(
     stats.currentXP = newLevelInfo.currentXP;
   }
 
-  return { newUnlocks, totalXPGained, stats };
+  let previousUnlockCount = -1;
+  while (previousUnlockCount !== newUnlocks.length) {
+    previousUnlockCount = newUnlocks.length;
+    const xpBefore = totalXPGained;
+    checkLevelAchievements();
+    const levelXpDelta = totalXPGained - xpBefore;
+    if (levelXpDelta > 0) {
+      stats.totalXP += levelXpDelta;
+      const newLevelInfo = calculateLevelInfo(stats.totalXP);
+      stats.level = newLevelInfo.level;
+      stats.currentXP = newLevelInfo.currentXP;
+    }
+  }
+
+  userAchievements.totalXPFromAchievements += totalXPGained;
+  userAchievements.lastUpdated = Date.now();
+
+  const achievementsWrite: nkruntime.StorageWriteRequest = {
+    collection: ACHIEVEMENT_CONFIG.STORAGE_COLLECTION,
+    key: ACHIEVEMENT_CONFIG.STORAGE_KEY,
+    userId,
+    value: userAchievements as { [key: string]: any },
+    permissionRead: 2,
+    permissionWrite: 0,
+  };
+
+  return { newUnlocks, totalXPGained, stats, achievementsWrite };
+}
+
+/**
+ * Persist a single player's achievement evaluation (for the update_achievements RPC).
+ */
+export function persistAchievementEvaluation(
+  nk: nkruntime.Nakama,
+  result: EvaluateAchievementsResult
+): void {
+  const writes: nkruntime.StorageWriteRequest[] = [result.achievementsWrite];
+  if (result.totalXPGained > 0) {
+    const userId = result.achievementsWrite.userId;
+    writes.push({
+      collection: STATS_COLLECTION,
+      key: STATS_KEY,
+      userId,
+      value: result.stats as { [key: string]: any },
+      permissionRead: 2,
+      permissionWrite: 0,
+    });
+  }
+  nk.storageWrite(writes);
 }
 
 /**
  * Authoritative game-end writer: updates XP/level/streak/stats and evaluates achievements.
+ * Stats + achievement objects are committed in one storageWrite batch.
  */
 export function applyGameResultStats(
   nk: nkruntime.Nakama,
@@ -499,6 +565,7 @@ export function applyGameResultStats(
   input: ApplyGameResultInput
 ): ApplyGameResultOutput {
   const { players, winner, sheriffId } = input;
+  const shouldEvaluateAchievements = input.evaluateAchievements !== false;
   const now = Date.now();
   const today = getTodayString();
   const writes: nkruntime.StorageWriteRequest[] = [];
@@ -531,41 +598,45 @@ export function applyGameResultStats(
       logger?.info(`Player ${userId} leveled up: ${applied.oldLevel} -> ${stats.level}`);
     }
 
-    const loversWon = winner === Faction.LOVERS || winner === 'lovers';
-    const wasSheriff = userId === sheriffId;
-    const achievementResult = evaluateAchievements(nk, logger, {
-      userId,
-      stats,
-      won: player.isWinner,
-      role: player.role,
-      faction: player.faction,
-      survived: player.isAlive,
-      wasSheriff,
-      isLover: !!player.isLover,
-      loversWon: !!player.isLover && loversWon,
-      seerCheckedWolves: player.seerCheckedWolves ?? 0,
-      witchSaved: player.witchSaved ?? false,
-      witchPoisonedWolf: player.witchPoisonedWolf ?? false,
-      guardSaved: player.guardSaved ?? false,
-      hunterKilledWolf: player.hunterKilledWolf ?? false,
-      idiotRevealed: player.idiotRevealed ?? false,
-      playerFactionSize: player.playerFactionSize ?? 0,
-      votedOutWolves: player.votedOutWolves ?? 0,
-      wasExposed: player.wasExposed ?? false,
-    });
-    stats = achievementResult.stats;
+    if (shouldEvaluateAchievements) {
+      const loversWon = winner === Faction.LOVERS || winner === 'lovers';
+      const wasSheriff = userId === sheriffId;
+      const achievementResult = evaluateAchievements(nk, logger, {
+        userId,
+        stats,
+        won: player.isWinner,
+        role: player.role,
+        faction: player.faction,
+        survived: player.isAlive,
+        wasSheriff,
+        isLover: !!player.isLover,
+        loversWon: !!player.isLover && loversWon,
+        seerCheckedWolves: player.seerCheckedWolves ?? 0,
+        witchSaved: player.witchSaved ?? false,
+        witchPoisonedWolf: player.witchPoisonedWolf ?? false,
+        guardSaved: player.guardSaved ?? false,
+        hunterKilledWolf: player.hunterKilledWolf ?? false,
+        idiotRevealed: player.idiotRevealed ?? false,
+        playerFactionSize: player.playerFactionSize ?? 0,
+        votedOutWolves: player.votedOutWolves ?? 0,
+        // Pass through as-is (undefined stays undefined — no false default)
+        wasExposed: player.wasExposed,
+      });
+      stats = achievementResult.stats;
+      writes.push(achievementResult.achievementsWrite);
 
-    achievements.push({
-      userId,
-      newUnlocks: achievementResult.newUnlocks,
-      totalXPGained: achievementResult.totalXPGained,
-    });
+      achievements.push({
+        userId,
+        newUnlocks: achievementResult.newUnlocks,
+        totalXPGained: achievementResult.totalXPGained,
+      });
+    }
 
     writes.push({
       collection: STATS_COLLECTION,
       key: STATS_KEY,
       userId,
-      value: stats,
+      value: stats as { [key: string]: any },
       permissionRead: 2,
       permissionWrite: 0,
     });
@@ -574,12 +645,12 @@ export function applyGameResultStats(
   if (writes.length > 0) {
     nk.storageWrite(writes);
     logger?.info(
-      `Recorded stats for ${writes.length} players, ${levelUps.length} leveled up`
+      `Recorded stats for ${players.length} players (${writes.length} storage objects), ${levelUps.length} leveled up`
     );
   }
 
   return {
-    playersUpdated: writes.length,
+    playersUpdated: players.filter(p => resolvePlayerUserId(p)).length,
     levelUps,
     achievements,
   };

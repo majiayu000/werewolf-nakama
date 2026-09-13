@@ -32,6 +32,7 @@ import {
   STATS_KEY,
   applyGameResultStats,
   evaluateAchievements,
+  persistAchievementEvaluation,
   readAchievements,
   readUserStats,
   resolvePlayerUserId,
@@ -406,10 +407,13 @@ function rpcRecordGameResult(
 
     logger.info(`Recording game result for ${normalizedPlayers.length} players, winner: ${winner}`);
 
+    // Stats-only: legacy clients may also call update_achievements; avoid double-counting
+    // event-based achievement progress (survivals, skill counters, etc.).
     const result = applyGameResultStats(nk, logger, {
       players: normalizedPlayers,
       winner,
       sheriffId,
+      evaluateAchievements: false,
     });
 
     return JSON.stringify({
@@ -1049,7 +1053,7 @@ function rpcUpdateAchievements(
       idiotRevealed = false,
       playerFactionSize = 0,
       votedOutWolves = 0,
-      wasExposed = false,
+      wasExposed,
     } = data;
 
     if (!userId) {
@@ -1080,20 +1084,11 @@ function rpcUpdateAchievements(
       idiotRevealed,
       playerFactionSize,
       votedOutWolves,
-      wasExposed,
+      // Pass through as-is; undefined must not award SILENT_KILLER
+      wasExposed: typeof wasExposed === 'boolean' ? wasExposed : undefined,
     });
 
-    // Persist stats if achievement XP changed them
-    if (result.totalXPGained > 0) {
-      nk.storageWrite([{
-        collection: STATS_COLLECTION,
-        key: STATS_KEY,
-        userId,
-        value: result.stats,
-        permissionRead: 2,
-        permissionWrite: 0,
-      }]);
-    }
+    persistAchievementEvaluation(nk, result);
 
     const userAchievements = readAchievements(nk, userId);
     return JSON.stringify({

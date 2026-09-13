@@ -180,6 +180,7 @@ function createInitialState(matchId: string, params: { [key: string]: string }):
     phaseEndTime: Date.now() + 300000, // 5 minutes default
     winner: null,
     gameEndReason: null,
+    pendingStatsRecord: false,
     // 私密房间相关
     password,
     roomName,
@@ -634,6 +635,12 @@ function processShooterAction(
 
       logger.info(`${shooter.displayName} shot ${target.displayName}`);
 
+      // Track hunter/alpha-wolf killing a werewolf for achievements
+      if (target.role && isWerewolf(target.role)) {
+        const shooterExt = state.extendedStates.get(shooter.oderId);
+        if (shooterExt) shooterExt.hunterKilledWolf = true;
+      }
+
       // Broadcast the result
       broadcastMessage(dispatcher, OpCode.DEATH_SKILL_RESULT, {
         shooterId: shooter.oderId,
@@ -807,6 +814,13 @@ function assignRoles(state: GameState, logger: nkruntime.Logger): void {
       idiotRevealed: false,
       isLovers: false,
       loverId: null,
+      seerCheckedWolves: 0,
+      witchSaved: false,
+      witchPoisonedWolf: false,
+      guardSaved: false,
+      hunterKilledWolf: false,
+      wasExposed: false,
+      votedOutWolves: 0,
     };
 
     // Initialize witch items
@@ -1180,6 +1194,15 @@ matchLoop = function matchLoop(
       transitionPhase(gameState, dispatcher, logger);
     }
 
+    // Flush deferred stats/replay when endGame ran without nk (last-words/death-skill/transfer)
+    if (
+      gameState.phase === GamePhase.GAME_OVER &&
+      gameState.pendingStatsRecord &&
+      gameState.winner
+    ) {
+      finalizeGameEndPersistence(gameState, gameState.winner, nk, logger);
+    }
+
     // Check win condition (skip during death skill phase - will be checked after)
     if (gameState.phase !== GamePhase.WAITING &&
         gameState.phase !== GamePhase.GAME_OVER &&
@@ -1213,22 +1236,27 @@ matchTerminate = function matchTerminate(
     const gameState = state as unknown as GameState;
     logger.info('Match terminating');
 
+    // Flush deferred stats if game ended without nk on the terminal path
+    if (gameState.pendingStatsRecord && gameState.winner) {
+      finalizeGameEndPersistence(gameState, gameState.winner, nk, logger);
+    }
+
     // Clean up match logger and decrement active matches gauge
     cleanupMatchLogger(gameState.matchId);
     metrics.decrementGauge(MetricNames.MATCHES_ACTIVE);
 
-    // Log match termination
-    gameLogger.info(LogCategory.MATCH, 'Match terminated', {
-      matchId: gameState.matchId,
-      data: {
-        phase: gameState.phase,
-        dayNumber: gameState.dayNumber,
-        playerCount: gameState.players.size,
-        spectatorCount: gameState.spectators.size,
-        winner: gameState.winner,
-        graceSeconds
-      }
-    });
+  // Log match termination
+  gameLogger.info(LogCategory.MATCH, 'Match terminated', {
+    matchId: gameState.matchId,
+    data: {
+      phase: gameState.phase,
+      dayNumber: gameState.dayNumber,
+      playerCount: gameState.players.size,
+      spectatorCount: gameState.spectators.size,
+      winner: gameState.winner,
+      graceSeconds
+    }
+  });
 
   return { state };
 }
@@ -1551,14 +1579,24 @@ function handleUseSkill(
         // Send result to seer
         const target = state.players.get(targetId);
         if (target && target.role) {
+          const targetFaction = getRoleFaction(target.role);
           sendToPlayer(dispatcher, OpCode.SKILL_RESULT, {
             skill: 'check',
             success: true,
             result: {
               targetId,
-              faction: getRoleFaction(target.role),
+              faction: targetFaction,
             },
           }, { userId: player.oderId, sessionId: '', username: '', node: '' });
+
+          // Track seer correct-wolf checks + wolf exposure for achievements
+          if (extState && isWerewolf(target.role)) {
+            extState.seerCheckedWolves = (extState.seerCheckedWolves || 0) + 1;
+            const targetExt = state.extendedStates.get(targetId);
+            if (targetExt) {
+              targetExt.wasExposed = true;
+            }
+          }
         }
       }
       break;
@@ -2007,11 +2045,24 @@ function processNightResults(
       // Check if protected by guard
       if (targetExt?.isProtected) {
         logger.info(`${target.displayName} was protected by guard`);
+        // Successful guard save against wolf kill
+        for (const [pid, p] of state.players) {
+          if (p.role === Role.GUARD && !p.isSpectator) {
+            const guardExt = state.extendedStates.get(pid);
+            if (guardExt) guardExt.guardSaved = true;
+          }
+        }
       }
       // Check if saved by witch
       else if (state.witchSaveTarget === state.wolfTarget) {
         savedByWitch = true;
         logger.info(`${target.displayName} was saved by witch`);
+        for (const [pid, p] of state.players) {
+          if (p.role === Role.WITCH && !p.isSpectator) {
+            const witchExt = state.extendedStates.get(pid);
+            if (witchExt) witchExt.witchSaved = true;
+          }
+        }
       }
       // Kill the target
       else {
@@ -2037,6 +2088,15 @@ function processNightResults(
         cause: PlayerStatus.DEAD_BY_POISON,
       });
       logger.info(`${target.displayName} was poisoned by witch`);
+
+      if (target.role && isWerewolf(target.role)) {
+        for (const [pid, p] of state.players) {
+          if (p.role === Role.WITCH && !p.isSpectator) {
+            const witchExt = state.extendedStates.get(pid);
+            if (witchExt) witchExt.witchPoisonedWolf = true;
+          }
+        }
+      }
     }
   }
 
@@ -2157,6 +2217,16 @@ function processVotes(
       } else {
         target.status = PlayerStatus.DEAD_BY_VOTE;
         logger.info(`${target.displayName} was voted out`);
+
+        // Count wolf eliminations toward voters' WOLF_EXTERMINATOR progress
+        if (target.role && isWerewolf(target.role)) {
+          for (const [voterId, vote] of state.votes) {
+            if (vote.targetId === eliminated) {
+              const voterExt = state.extendedStates.get(voterId);
+              if (voterExt) voterExt.votedOutWolves = (voterExt.votedOutWolves || 0) + 1;
+            }
+          }
+        }
 
         // Check if voted player has a lover who must die too
         const dyingLover = processLoverDeath(state, eliminated!, dispatcher, logger);
@@ -2336,53 +2406,71 @@ function endGame(
 
   // Record game results to user statistics and save replay
   if (nk) {
-    recordGameStats(state, winner, nk, logger);
-
-    // Save game replay
-    try {
-      const replayBuffer = matchReplayBuffers.get(state.matchId);
-      if (replayBuffer) {
-        // Update player states before building replay
-        for (const [playerId, player] of state.players) {
-          if (player.isSpectator) continue;
-          const extState = state.extendedStates.get(playerId);
-          replayBuffer.updatePlayer(playerId, {
-            isAlive: player.status === PlayerStatus.ALIVE,
-            isSheriff: playerId === state.sheriffId,
-            isLover: extState?.isLovers || false,
-            loverId: extState?.loverId
-          });
-        }
-
-        // Record game end event
-        replayBuffer.addEvent({
-          type: GameEventType.GAME_WIN,
-          day: state.dayNumber,
-          phase: state.phase,
-          data: {
-            winner,
-            reason: state.gameEndReason,
-            survivors: alivePlayers.map(p => ({ id: p.oderId, name: p.displayName, role: p.role }))
-          }
-        });
-
-        // Build and save replay
-        const winnerFaction = winner === Faction.LOVERS ? 'lovers' : winner;
-        const replay = replayBuffer.build(winnerFaction as Faction | 'lovers');
-        const participantIds = Array.from(state.players.values())
-          .filter(p => !p.isSpectator)
-          .map(p => p.oderId);
-
-        saveReplay(nk, replay, participantIds);
-        logger.info(`Saved replay for match ${state.matchId} with ${replayBuffer.getEventCount()} events`);
-      }
-    } catch (e) {
-      logger.error(`Failed to save replay: ${e}`);
-    }
-
-    // Clean up replay buffer
-    cleanupReplayBuffer(state.matchId);
+    finalizeGameEndPersistence(state, winner, nk, logger);
+  } else {
+    // Terminal paths (last words / death skill / sheriff transfer) call endGame
+    // without nk; matchLoop will flush on the next tick with nk available.
+    state.pendingStatsRecord = true;
   }
+}
+
+/**
+ * Persist stats/achievements and replay after game end (requires nk).
+ */
+function finalizeGameEndPersistence(
+  state: GameState,
+  winner: Faction,
+  nk: nkruntime.Nakama,
+  logger: nkruntime.Logger
+): void {
+  state.pendingStatsRecord = false;
+  recordGameStats(state, winner, nk, logger);
+
+  // Save game replay
+  try {
+    const replayBuffer = matchReplayBuffers.get(state.matchId);
+    if (replayBuffer) {
+      // Update player states before building replay
+      for (const [playerId, player] of state.players) {
+        if (player.isSpectator) continue;
+        const extState = state.extendedStates.get(playerId);
+        replayBuffer.updatePlayer(playerId, {
+          isAlive: player.status === PlayerStatus.ALIVE,
+          isSheriff: playerId === state.sheriffId,
+          isLover: extState?.isLovers || false,
+          loverId: extState?.loverId
+        });
+      }
+
+      // Record game end event
+      const alivePlayers = getAlivePlayers(state);
+      replayBuffer.addEvent({
+        type: GameEventType.GAME_WIN,
+        day: state.dayNumber,
+        phase: state.phase,
+        data: {
+          winner,
+          reason: state.gameEndReason,
+          survivors: alivePlayers.map(p => ({ id: p.oderId, name: p.displayName, role: p.role }))
+        }
+      });
+
+      // Build and save replay
+      const winnerFaction = winner === Faction.LOVERS ? 'lovers' : winner;
+      const replay = replayBuffer.build(winnerFaction as Faction | 'lovers');
+      const participantIds = Array.from(state.players.values())
+        .filter(p => !p.isSpectator)
+        .map(p => p.oderId);
+
+      saveReplay(nk, replay, participantIds);
+      logger.info(`Saved replay for match ${state.matchId} with ${replayBuffer.getEventCount()} events`);
+    }
+  } catch (e) {
+    logger.error(`Failed to save replay: ${e}`);
+  }
+
+  // Clean up replay buffer
+  cleanupReplayBuffer(state.matchId);
 }
 
 /**
@@ -2396,9 +2484,9 @@ function recordGameStats(
   logger: nkruntime.Logger
 ): void {
   try {
-    const playerData = Array.from(state.players.values())
-      .filter(p => !p.isSpectator)
-      .map(p => {
+    const nonSpectators = Array.from(state.players.values()).filter(p => !p.isSpectator);
+
+    const playerData = nonSpectators.map(p => {
         const extState = state.extendedStates.get(p.oderId);
         const faction = p.role ? getRoleFaction(p.role) : Faction.VILLAGER;
         const isLover = extState?.isLovers || false;
@@ -2412,6 +2500,12 @@ function recordGameStats(
           isWinner = faction !== Faction.WEREWOLF;
         }
 
+        // Alive same-faction size (for LAST_STAND / COMEBACK_KING)
+        const playerFactionSize = nonSpectators.filter(other => {
+          if (other.status !== PlayerStatus.ALIVE || !other.role) return false;
+          return getRoleFaction(other.role) === faction;
+        }).length;
+
         return {
           // Shared writer accepts userId; match players use oderId as Nakama user id
           userId: p.oderId,
@@ -2421,13 +2515,16 @@ function recordGameStats(
           isWinner,
           isAlive: p.status === PlayerStatus.ALIVE,
           isLover,
-          // Skill counters defaulted — match state does not track them yet
-          seerCheckedWolves: 0,
-          witchSaved: false,
-          witchPoisonedWolf: false,
-          guardSaved: false,
-          hunterKilledWolf: false,
+          seerCheckedWolves: extState?.seerCheckedWolves || 0,
+          witchSaved: !!extState?.witchSaved,
+          witchPoisonedWolf: !!extState?.witchPoisonedWolf,
+          guardSaved: !!extState?.guardSaved,
+          hunterKilledWolf: !!extState?.hunterKilledWolf,
           idiotRevealed: !!extState?.idiotRevealed,
+          // Explicit boolean — unknown/omitted must not award SILENT_KILLER
+          wasExposed: !!extState?.wasExposed,
+          votedOutWolves: extState?.votedOutWolves || 0,
+          playerFactionSize,
         };
       });
 
