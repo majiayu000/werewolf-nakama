@@ -285,6 +285,25 @@ export function expireAcceptedInviteRetryIfNeeded(
   return true;
 }
 
+/**
+ * Invites the client should still see via get_invites.
+ *
+ * Pending invites are the normal inbox. Accepted invites remain visible until
+ * expiresAt so a lost accept RPC response or failed join can rediscover the
+ * invite ID and retry the idempotent accept path for password recovery.
+ */
+export function isInviteDiscoverableForClient(
+  invite: { status: string; expiresAt: number },
+  now: number = Date.now()
+): boolean {
+  if (invite.status === 'pending') {
+    return true;
+  }
+  return invite.status === 'accepted' &&
+    typeof invite.expiresAt === 'number' &&
+    invite.expiresAt >= now;
+}
+
 /** Minimum interval between collection-wide invite-secret expiry sweeps. */
 export const INVITE_SECRET_SWEEP_INTERVAL_MS = 60_000;
 

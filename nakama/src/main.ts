@@ -37,6 +37,7 @@ import {
   reclaimSecretsForRemovedInvites,
   reclaimExpiredInviteSecrets,
   expireAcceptedInviteRetryIfNeeded,
+  isInviteDiscoverableForClient,
   maybeSweepExpiredInviteSecrets,
   migrateLegacyInvitePasswordIfNeeded,
   migrateLegacyPasswordsBeforeInviteWrite,
@@ -819,7 +820,9 @@ function rpcSendInvite(
 }
 
 /**
- * RPC: Get pending invites for the current user
+ * RPC: Get discoverable invites for the current user.
+ * Returns pending invites plus unexpired accepted invites (for accept-retry
+ * password recovery after a lost RPC response or failed join).
  */
 function rpcGetInvites(
   ctx: nkruntime.Context,
@@ -847,9 +850,14 @@ function rpcGetInvites(
         hasExpired = true;
         // Drop server-only credential once the invite can no longer be accepted
         deleteInviteSecret(nk, invite.inviteId, invite.receiverId);
+      } else if (
+        invite.status === InviteStatus.ACCEPTED &&
+        expireAcceptedInviteRetryIfNeeded(nk, invite, now)
+      ) {
+        hasExpired = true;
       }
-      // Only return pending invites by default (password never lives on invite objects)
-      if (invite.status === InviteStatus.PENDING) {
+      // Pending + unexpired accepted (password never lives on invite objects)
+      if (isInviteDiscoverableForClient(invite, now)) {
         validInvites.push(stripInvitePassword(invite));
       }
     }

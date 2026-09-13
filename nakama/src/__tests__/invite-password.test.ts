@@ -18,6 +18,7 @@ import {
   reclaimSecretsForRemovedInvites,
   reclaimExpiredInviteSecrets,
   expireAcceptedInviteRetryIfNeeded,
+  isInviteDiscoverableForClient,
   sweepExpiredInviteSecretsFromStorage,
   maybeSweepExpiredInviteSecrets,
   migrateLegacyInvitePasswordIfNeeded,
@@ -493,5 +494,15 @@ describe('invite secret storage', () => {
       0
     );
     expect(store.has(`${INVITE_SECRET_COLLECTION}:receiver-cron:inv_cron`)).toBe(false);
+  });
+
+  it('keeps unexpired accepted invites discoverable for get_invites recovery', () => {
+    const now = Date.now();
+    expect(isInviteDiscoverableForClient({ status: 'pending', expiresAt: now + 60_000 }, now)).toBe(true);
+    expect(isInviteDiscoverableForClient({ status: 'accepted', expiresAt: now + 60_000 }, now)).toBe(true);
+    expect(isInviteDiscoverableForClient({ status: 'accepted', expiresAt: now - 1 }, now)).toBe(false);
+    expect(isInviteDiscoverableForClient({ status: 'declined', expiresAt: now + 60_000 }, now)).toBe(false);
+    expect(isInviteDiscoverableForClient({ status: 'expired', expiresAt: now + 60_000 }, now)).toBe(false);
+    expect(isInviteDiscoverableForClient({ status: 'cancelled', expiresAt: now + 60_000 }, now)).toBe(false);
   });
 });
