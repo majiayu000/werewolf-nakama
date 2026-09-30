@@ -2,6 +2,8 @@
 
 An online multiplayer Werewolf (Mafia) game built with Nakama game server and React.
 
+[Quick start](#quick-start) · [Game rules](#game-rules) · [Deployment guide](DEPLOY.md)
+
 ## Features
 
 ### Core Gameplay
@@ -96,7 +98,7 @@ npm run dev
 
 ### 3. Access the Application
 
-- **Game**: http://localhost:5173
+- **Game**: http://localhost:3000
 - **Nakama Console**: http://localhost:7351 (admin/password)
 - **Nakama API**: http://localhost:7350
 
@@ -320,7 +322,7 @@ See [DEPLOY.md](./DEPLOY.md) for detailed deployment instructions including:
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+The client and server package manifests declare MIT. A root license file has not been included in this repository.
 
 ## Acknowledgments
 
