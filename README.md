@@ -31,7 +31,7 @@ An online multiplayer Werewolf (Mafia) game built with Nakama game server and Re
 
 ### Technical Features
 - Real-time WebSocket communication
-- PWA support (installable, offline capable)
+- PWA support (installable client shell; live matches require a backend connection)
 - Dark/Light theme toggle
 - Mobile responsive design
 - Keyboard shortcuts for power users
@@ -101,6 +101,21 @@ npm run dev
 - **Game**: http://localhost:3000
 - **Nakama Console**: http://localhost:7351 (admin/password)
 - **Nakama API**: http://localhost:7350
+
+## First self-hosted room
+
+1. Complete [Quick Start](#quick-start) and open the client on the same computer as Nakama. This repository supplies client and server source; a live match needs both services.
+2. Authenticate, then create or join a room. The [client hook](client/src/hooks/useNakama.ts) handles authentication and the real-time socket; a successful sign-in alone does not establish a match connection.
+3. Have every participant mark themselves ready. The [server handler](nakama/src/werewolf/match_handler.ts) starts automatically when **all players are ready** and the room reaches its configured minimum. The [default configuration](nakama/src/werewolf/types.ts) uses six players; two connected clients do not meet that default.
+4. Follow your assigned role through [the game phases](#game-rules). For implementation study, follow the ready-message handler into `startGame`, then the phase-specific message handlers.
+
+### Connection questions
+
+**Why does another device fail to connect?** The current hook sets the Nakama host to `localhost`, port `7350`, with SSL disabled. On a phone or a second computer, `localhost` refers to that device. Remote play requires a reachable Nakama service and matching host/port/transport settings in the client. See [the deployment guide](DEPLOY.md#前端配置); setting a `VITE_NAKAMA_*` variable alone currently has no effect because the hook does not read those variables.
+
+**Can the PWA play a multiplayer match offline?** PWA installation provides a client shell. Authentication, room state and live matches still need the backend connection; static hosting or an installed shell cannot replace Nakama.
+
+**What should I check when a room stays in waiting?** Check the configured minimum and every player's ready state first, then the socket connection. Keep client and server commits together when reproducing a problem.
 
 ## Project Structure
 
@@ -306,11 +321,8 @@ See [DEPLOY.md](./DEPLOY.md) for detailed deployment instructions including:
 | `DB_HOST` | Database host | cockroachdb |
 
 **Frontend**
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `VITE_NAKAMA_HOST` | Nakama server host | localhost |
-| `VITE_NAKAMA_PORT` | Nakama server port | 7350 |
-| `VITE_NAKAMA_USE_SSL` | Use HTTPS/WSS | false |
+
+The current [client hook](client/src/hooks/useNakama.ts) sets host `localhost`, port `7350` and SSL `false` as constants. It does not read `VITE_NAKAMA_HOST`, `VITE_NAKAMA_PORT` or `VITE_NAKAMA_USE_SSL`. The deployment guide's environment-based snippet is a suggested code change, rather than an existing configuration interface.
 
 ## Contributing
 
@@ -331,3 +343,7 @@ The client and server package manifests declare MIT. A root license file has not
 - [Tailwind CSS](https://tailwindcss.com/) - CSS framework
 - [Framer Motion](https://www.framer.com/motion/) - Animation library
 - [Zustand](https://github.com/pmndrs/zustand) - State management
+
+## Support and source history
+
+For connection or rule issues, include the client/server commit, browser, reproduction steps and error text in [Issues](https://github.com/majiayu000/werewolf-nakama/issues). Follow [source updates](https://github.com/majiayu000/werewolf-nakama/commits/main/).

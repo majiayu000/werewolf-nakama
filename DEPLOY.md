@@ -430,7 +430,9 @@ kubectl apply -f k8s/ingress.yaml
 
 ### 前端配置
 
-在生产环境构建前端时，可以设置以下环境变量：
+当前 [useNakama.ts](client/src/hooks/useNakama.ts) 使用硬编码的 `localhost:7350`，SSL 为 `false`，尚未读取以下变量。下面是需要先修改客户端代码才能使用的配置示例；仅创建环境变量文件并重新构建，不会改变当前连接地址。跨设备访问时，客户端需要指向可达的 Nakama 服务。
+
+完成对应代码修改后，可在生产构建时配置：
 
 ```bash
 # .env.production
@@ -439,7 +441,7 @@ VITE_NAKAMA_PORT=443
 VITE_NAKAMA_USE_SSL=true
 ```
 
-前端代码中使用：
+对应的客户端读取方式示例（当前 Hook 尚未采用）：
 
 ```typescript
 const host = import.meta.env.VITE_NAKAMA_HOST || 'localhost';
