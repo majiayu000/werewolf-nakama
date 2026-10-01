@@ -334,7 +334,7 @@ The current [client hook](client/src/hooks/useNakama.ts) sets host `localhost`, 
 
 ## License
 
-The client and server package manifests declare MIT. A root license file has not been included in this repository.
+The [server package manifest](nakama/package.json) declares `MIT`. The [client package manifest](client/package.json) does not declare a license. A root license file has not been included in this repository.
 
 ## Acknowledgments
 
